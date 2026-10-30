@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Request, Path
+from fastapi import FastAPI, Request, Path, Query
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, Response
 import mysql.connector
@@ -10,10 +10,15 @@ from schemas import (
     ServiceJobCreate,
     ServiceItemCreate,
     BookingCreate,
+    BookingLookupRequest,
+    BookingRescheduleRequest,
+    StatusUpdateRequest,
     AdminLoginRequest,
+    SERVICE_DURATION_MINUTES,
 )
 import time
 import os
+import re
 import uuid
 import hmac
 import hashlib
@@ -58,6 +63,8 @@ app.add_middleware(
 _SESSION_COOKIE_NAME = "sender_admin_session"
 _SESSION_TTL_SECONDS = 8 * 3600  # อายุเซสชัน 8 ชั่วโมง
 _BANGKOK_TZ = timezone(timedelta(hours=7))
+_MAX_CARS_PER_SLOT = int(os.getenv("MAX_CARS_PER_SLOT", "2"))
+_MIN_LEAD_MINUTES = int(os.getenv("MIN_LEAD_TIME_MINUTES", "60"))
 _schema_checked = False
 
 
@@ -163,14 +170,29 @@ def _hash_client_ip(request: Request | None) -> str:
 
 
 def _ensure_phase_b_columns(cursor, connect):
-    """ตรวจสอบและเพิ่มคอลัมน์ใหม่ใน Appointments แบบ Idempotent (รองรับทั้ง MySQL 8 และ TiDB)"""
+    """ตรวจสอบและเพิ่มคอลัมน์ใหม่แบบ Idempotent (รองรับทั้ง MySQL 8 และ TiDB)"""
     global _schema_checked
     if _schema_checked:
         return
     try:
+        cursor.execute("SHOW COLUMNS FROM Customers")
+        cust_cols = {row[0].lower() for row in cursor.fetchall()}
+        if "lineid" not in cust_cols:
+            cursor.execute("ALTER TABLE Customers ADD COLUMN LineID VARCHAR(100) DEFAULT NULL")
+
+        cursor.execute("SHOW COLUMNS FROM Vehicles")
+        veh_cols = {row[0].lower() for row in cursor.fetchall()}
+        if "caryear" not in veh_cols:
+            cursor.execute("ALTER TABLE Vehicles ADD COLUMN CarYear INT DEFAULT NULL")
+
         cursor.execute("SHOW COLUMNS FROM Appointments")
         existing_cols = {row[0].lower() for row in cursor.fetchall()}
         alters = [
+            ("bookingref", "ALTER TABLE Appointments ADD COLUMN BookingRef VARCHAR(30) DEFAULT NULL"),
+            ("estimatedminutes", "ALTER TABLE Appointments ADD COLUMN EstimatedMinutes INT DEFAULT 90"),
+            ("mileage", "ALTER TABLE Appointments ADD COLUMN Mileage INT DEFAULT NULL"),
+            ("internalnotes", "ALTER TABLE Appointments ADD COLUMN InternalNotes TEXT"),
+            ("photourl", "ALTER TABLE Appointments ADD COLUMN PhotoURL MEDIUMTEXT DEFAULT NULL"),
             ("createdatutc", "ALTER TABLE Appointments ADD COLUMN CreatedAtUTC DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP"),
             ("consentatutc", "ALTER TABLE Appointments ADD COLUMN ConsentAtUTC DATETIME DEFAULT NULL"),
             ("consentversion", "ALTER TABLE Appointments ADD COLUMN ConsentVersion VARCHAR(20) DEFAULT 'v1.0'"),
@@ -180,6 +202,12 @@ def _ensure_phase_b_columns(cursor, connect):
         for col_lower, sql in alters:
             if col_lower not in existing_cols:
                 cursor.execute(sql)
+
+        cursor.execute("SHOW COLUMNS FROM Service_Jobs")
+        job_cols = {row[0].lower() for row in cursor.fetchall()}
+        if "internalnotes" not in job_cols:
+            cursor.execute("ALTER TABLE Service_Jobs ADD COLUMN InternalNotes TEXT")
+
         connect.commit()
         _schema_checked = True
     except mysql.connector.Error:
@@ -195,7 +223,28 @@ def _utc_to_bangkok_str(dt_val) -> str | None:
     return str(dt_val)
 
 
-def _send_line_push(booking_id: int, brand: str, model: str, plate: str, appt_date: str, appt_time: str, service_type: str) -> str:
+def _check_lead_time_valid(appt_date_str: str, appt_time_str: str) -> tuple[bool, str]:
+    now_bkk = datetime.now(_BANGKOK_TZ)
+    slot_dt = datetime.strptime(f"{appt_date_str} {appt_time_str[:5]}", "%Y-%m-%d %H:%M").replace(tzinfo=_BANGKOK_TZ)
+    if slot_dt.date() == now_bkk.date():
+        diff_minutes = (slot_dt - now_bkk).total_seconds() / 60.0
+        if diff_minutes < _MIN_LEAD_MINUTES:
+            return False, f"สำหรับการจองคิวในวันนี้ กรุณานัดหมายล่วงหน้าอย่างน้อย {_MIN_LEAD_MINUTES} นาที"
+    return True, ""
+
+
+def _parse_booking_ref_condition(ref_raw: str) -> tuple[str, str | int]:
+    cleaned = ref_raw.strip().upper()
+    if cleaned.startswith("#"):
+        cleaned = cleaned[1:].strip()
+    if cleaned.startswith("BK-") and cleaned[3:].isdigit():
+        return "a.AppointmentID = %s", int(cleaned[3:])
+    if cleaned.isdigit():
+        return "a.AppointmentID = %s", int(cleaned)
+    return "a.BookingRef = %s", cleaned
+
+
+def _send_line_push(booking_ref: str, brand: str, model: str, plate: str, appt_date: str, appt_time: str, service_type: str) -> str:
     """ส่งแจ้งเตือนเข้า LINE Messaging API (ถ้าตั้งค่าไว้) โดยไม่ทำให้การจองล้มเหลวหากส่งไม่สำเร็จ"""
     token = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "").strip()
     target_id = os.getenv("LINE_ADMIN_USER_ID", "").strip()
@@ -203,7 +252,7 @@ def _send_line_push(booking_id: int, brand: str, model: str, plate: str, appt_da
         return "Skipped"
 
     text_msg = (
-        f"[The Sender Moto] มีคิวจองใหม่ #BK-{booking_id}\n"
+        f"[The Sender Moto] มีคิวจองใหม่ {booking_ref}\n"
         f"รถ: {brand} {model} ({plate})\n"
         f"บริการ: {service_type}\n"
         f"วัน-เวลา: {appt_date} {appt_time} น."
@@ -323,7 +372,16 @@ async def api_prefix_and_security_middleware(request: Request, call_next):
 
     is_public_route = (
         request.method == "OPTIONS"
-        or normalized_path in ("/", "/health", "/admin/login", "/admin/logout")
+        or normalized_path in (
+            "/",
+            "/health",
+            "/slots/availability",
+            "/bookings/lookup",
+            "/bookings/reschedule",
+            "/bookings/cancel",
+            "/admin/login",
+            "/admin/logout",
+        )
         or (normalized_path == "/bookings" and request.method == "POST")
     )
 
@@ -687,11 +745,58 @@ def get_service_items():
 #------------------------------------------------------------------------------------------------------#
 #   START booking
 ########################################################################################################
+@app.get("/slots/availability")
+def get_slot_availability(date: str = Query(..., min_length=10, max_length=10)):
+    """ตรวจสอบจำนวนคิวว่างในแต่ละช่วงเวลาของวันที่เลือก"""
+    if not re.match(r"^\d{4}-\d{2}-\d{2}$", date):
+        return {"status": "Failed", "message": "รูปแบบวันที่ไม่ถูกต้อง"}
+
+    connect = get_data_connection()
+    if not connect:
+        return {"status": "Failed", "message": "Database connection error"}
+
+    cursor = connect.cursor(dictionary=True)
+    try:
+        cursor.execute(
+            """
+            SELECT AppointmentTime, COUNT(*) AS BookedCount
+            FROM Appointments
+            WHERE AppointmentDate = %s AND Status IN ('Pending', 'Confirmed', 'In Progress', 'Ready')
+            GROUP BY AppointmentTime
+            """,
+            (date,)
+        )
+        counts = {}
+        for row in cursor.fetchall():
+            t_str = str(row["AppointmentTime"])[:5]
+            if len(t_str) == 4:
+                t_str = "0" + t_str
+            counts[t_str] = int(row["BookedCount"])
+
+        return {
+            "status": "Success",
+            "date": date,
+            "max_per_slot": _MAX_CARS_PER_SLOT,
+            "booked_slots": counts,
+        }
+    except mysql.connector.Error as e:
+        _log_db_error("get_slot_availability", e)
+        return {"status": "Failed", "message": "ไม่สามารถตรวจสอบคิวว่างได้"}
+    finally:
+        cursor.close()
+        connect.close()
+
+
 @app.post("/bookings")
 def create_booking(booking: BookingCreate, request: Request = None):
     # 1. ดักบอทด้วย Honeypot (ถ้าช่องซ่อนถูกกรอก ให้ตอบกลับทันทีโดยไม่เปลืองโควตา DB)
     if booking.Website and booking.Website.strip():
         return {"status": "Success", "message": "จองคิวสำเร็จ"}
+
+    # 2. ตรวจสอบระยะเวลาจองล่วงหน้าขั้นต่ำ (Minimum Lead Time)
+    lead_ok, lead_msg = _check_lead_time_valid(booking.AppointmentDate, booking.AppointmentTime)
+    if not lead_ok:
+        return {"status": "Failed", "message": lead_msg}
 
     connect = get_data_connection()
     if not connect:
@@ -701,10 +806,10 @@ def create_booking(booking: BookingCreate, request: Request = None):
     try:
         _ensure_phase_b_columns(cursor, connect)
 
-        # 2. ตรวจสอบ IdempotencyKey ก่อน เพื่อป้องกันการกดส่งซ้ำโดยไม่สร้างคิวซ้ำ
+        # 3. ตรวจสอบ IdempotencyKey ก่อน เพื่อป้องกันการกดส่งซ้ำโดยไม่สร้างคิวซ้ำ
         if booking.IdempotencyKey:
             cursor.execute(
-                "SELECT AppointmentID FROM Appointments WHERE IdempotencyKey = %s LIMIT 1",
+                "SELECT AppointmentID, BookingRef FROM Appointments WHERE IdempotencyKey = %s LIMIT 1",
                 (booking.IdempotencyKey,)
             )
             idem_row = cursor.fetchone()
@@ -713,14 +818,31 @@ def create_booking(booking: BookingCreate, request: Request = None):
                     "status": "Success",
                     "message": "จองคิวสำเร็จ",
                     "booking_id": idem_row[0],
+                    "booking_ref": idem_row[1] or f"BK-{idem_row[0]}",
                 }
 
-        # 3. จำกัดอัตราการยิงต่อ IP ผ่านตาราง Rate_Limits ในฐานข้อมูล (รองรับ Serverless 100%)
+        # 4. จำกัดอัตราการยิงต่อ IP ผ่านตาราง Rate_Limits ในฐานข้อมูล (รองรับ Serverless 100%)
         ip_hash = _hash_client_ip(request)
         if not _check_serverless_rate_limit(cursor, connect, "booking", ip_hash, max_hits=5, window_sec=600):
             return {"status": "Failed", "message": "คุณส่งคำขอจองคิวบ่อยเกินไป กรุณารอสักครู่แล้วลองใหม่อีกครั้ง"}
 
-        # 4. ตรวจสอบว่ามีลูกค้าที่ใช้เบอร์โทรศัพท์นี้อยู่แล้วหรือไม่ เพื่อลดข้อมูลซ้ำซ้อน
+        # 5. ป้องกันการจองชนกันในเวลาเดียวกันเกินจำนวนช่องซ่อม (Slot Capacity + FOR UPDATE Lock)
+        slot_time_sql = f"{booking.AppointmentTime}:00"
+        cursor.execute(
+            """
+            SELECT COUNT(*) FROM Appointments
+            WHERE AppointmentDate = %s AND AppointmentTime = %s
+              AND Status IN ('Pending', 'Confirmed', 'In Progress', 'Ready')
+            FOR UPDATE
+            """,
+            (booking.AppointmentDate, slot_time_sql)
+        )
+        slot_row = cursor.fetchone()
+        if slot_row and int(slot_row[0]) >= _MAX_CARS_PER_SLOT:
+            connect.rollback()
+            return {"status": "Failed", "message": "คิวซ่อมในช่วงเวลาที่เลือกเต็มแล้ว กรุณาเลือกช่วงเวลาอื่น"}
+
+        # 6. ตรวจสอบว่ามีลูกค้าที่ใช้เบอร์โทรศัพท์นี้อยู่แล้วหรือไม่ เพื่อลดข้อมูลซ้ำซ้อน
         cursor.execute(
             "SELECT CustomerID FROM Customers WHERE PhoneNumber = %s LIMIT 1",
             (booking.PhoneNumber,)
@@ -728,14 +850,19 @@ def create_booking(booking: BookingCreate, request: Request = None):
         existing_customer = cursor.fetchone()
         if existing_customer:
             customer_id = existing_customer[0]
+            if booking.Email or booking.LineID:
+                cursor.execute(
+                    "UPDATE Customers SET Email = COALESCE(%s, Email), LineID = COALESCE(%s, LineID) WHERE CustomerID = %s",
+                    (booking.Email, booking.LineID, customer_id)
+                )
         else:
             cursor.execute(
-                "INSERT INTO Customers (CustomerName, PhoneNumber) VALUES (%s, %s)",
-                (booking.CustomerName, booking.PhoneNumber)
+                "INSERT INTO Customers (CustomerName, PhoneNumber, Email, LineID) VALUES (%s, %s, %s, %s)",
+                (booking.CustomerName, booking.PhoneNumber, booking.Email, booking.LineID)
             )
             customer_id = cursor.lastrowid
 
-        # 5. ตรวจสอบว่ารถทะเบียนนี้ของลูกค้ารายนี้มีในระบบแล้วหรือไม่
+        # 7. ตรวจสอบว่ารถทะเบียนนี้ของลูกค้ารายนี้มีในระบบแล้วหรือไม่
         cursor.execute(
             "SELECT VehicleID FROM Vehicles WHERE CustomerID = %s AND CarNumber = %s LIMIT 1",
             (customer_id, booking.CarNumber)
@@ -743,42 +870,53 @@ def create_booking(booking: BookingCreate, request: Request = None):
         existing_vehicle = cursor.fetchone()
         if existing_vehicle:
             vehicle_id = existing_vehicle[0]
+            if booking.CarYear:
+                cursor.execute("UPDATE Vehicles SET CarYear = %s WHERE VehicleID = %s", (booking.CarYear, vehicle_id))
         else:
             # ใช้ UUID สั้นเพื่อให้ไม่ชนกันแม้มีลูกค้ากดจองพร้อมกันในวินาทีเดียวกัน (ยาว 17 ตัวอักษร)
             temp_vincode = f"TMP-{uuid.uuid4().hex[:13].upper()}"
             cursor.execute(
-                "INSERT INTO Vehicles (CustomerID, CarBrand, CarNumber, CarModel, VINCODE) VALUES (%s, %s, %s, %s, %s)",
-                (customer_id, booking.CarBrand, booking.CarNumber, booking.CarModel, temp_vincode)
+                "INSERT INTO Vehicles (CustomerID, CarBrand, CarNumber, CarModel, CarYear, VINCODE) VALUES (%s, %s, %s, %s, %s, %s)",
+                (customer_id, booking.CarBrand, booking.CarNumber, booking.CarModel, booking.CarYear, temp_vincode)
             )
             vehicle_id = cursor.lastrowid
 
-        # 6. ป้องกันการกดจองซ้ำในวันเดียวกันสำหรับรถคันเดิม
+        # 8. ป้องกันการกดจองซ้ำในวันเดียวกันสำหรับรถคันเดิม
         cursor.execute(
             """
             SELECT AppointmentID FROM Appointments
-            WHERE VehicleID = %s AND AppointmentDate = %s AND Status IN ('Pending', 'Confirmed', 'In Progress')
+            WHERE VehicleID = %s AND AppointmentDate = %s AND Status IN ('Pending', 'Confirmed', 'In Progress', 'Ready')
             LIMIT 1
             """,
             (vehicle_id, booking.AppointmentDate)
         )
         if cursor.fetchone():
+            connect.rollback()
             return {"status": "Failed", "message": "รถทะเบียนนี้มีคิวนัดหมายในวันที่เลือกไว้แล้ว"}
 
         now_utc_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        booking_ref = f"SM-{booking.AppointmentDate.replace('-', '')[2:]}-{uuid.uuid4().hex[:4].upper()}"
+        est_minutes = SERVICE_DURATION_MINUTES.get(booking.ServiceType, 90)
+
         cursor.execute(
             """
             INSERT INTO Appointments (
-                CustomerID, VehicleID, AppointmentDate, AppointmentTime, ServiceType,
-                Notes, Status, CreatedAtUTC, ConsentAtUTC, ConsentVersion, IdempotencyKey, NotificationStatus
-            ) VALUES (%s, %s, %s, %s, %s, %s, 'Pending', %s, %s, %s, %s, 'Pending')
+                BookingRef, CustomerID, VehicleID, AppointmentDate, AppointmentTime, ServiceType,
+                EstimatedMinutes, Mileage, Notes, PhotoURL, Status,
+                CreatedAtUTC, ConsentAtUTC, ConsentVersion, IdempotencyKey, NotificationStatus
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'Pending', %s, %s, %s, %s, 'Pending')
             """,
             (
+                booking_ref,
                 customer_id,
                 vehicle_id,
                 booking.AppointmentDate,
-                f"{booking.AppointmentTime}:00",
+                slot_time_sql,
                 booking.ServiceType,
+                est_minutes,
+                booking.Mileage,
                 booking.Notes,
+                booking.PhotoURL,
                 now_utc_str,
                 now_utc_str if booking.ConsentPDPA else None,
                 booking.ConsentVersion,
@@ -790,9 +928,9 @@ def create_booking(booking: BookingCreate, request: Request = None):
         # บันทึกข้อมูลการจองลงฐานข้อมูลให้สำเร็จก่อนเสมอ (Save Booking FIRST)
         connect.commit()
 
-        # 7. ส่งการแจ้งเตือนภายหลัง Commit (หากส่งไม่สำเร็จจะไม่กระทบคิวที่จองไว้แล้ว)
+        # 9. ส่งการแจ้งเตือนภายหลัง Commit (หากส่งไม่สำเร็จจะไม่กระทบคิวที่จองไว้แล้ว)
         notify_status = _send_line_push(
-            appointment_id,
+            booking_ref,
             booking.CarBrand,
             booking.CarModel,
             booking.CarNumber,
@@ -813,6 +951,8 @@ def create_booking(booking: BookingCreate, request: Request = None):
             "status": "Success",
             "message": "จองคิวสำเร็จ",
             "booking_id": appointment_id,
+            "booking_ref": booking_ref,
+            "estimated_minutes": est_minutes,
             "notification_status": notify_status,
         }
 
@@ -820,6 +960,163 @@ def create_booking(booking: BookingCreate, request: Request = None):
         connect.rollback()
         _log_db_error("create_booking", e)
         return {"status": "Failed", "message": "เกิดข้อผิดพลาดในการบันทึกคิวซ่อม กรุณาลองใหม่อีกครั้ง"}
+    finally:
+        cursor.close()
+        connect.close()
+
+
+@app.post("/bookings/lookup")
+def lookup_booking(req: BookingLookupRequest, request: Request = None):
+    """ให้ลูกค้าค้นหาสถานะคิวซ่อมด้วยรหัสการจอง (BookingRef หรือ #BK-ID) คู่กับเบอร์โทรศัพท์"""
+    connect = get_data_connection()
+    if not connect:
+        return {"status": "Failed", "message": "ไม่สามารถเชื่อมต่อฐานข้อมูลได้"}
+
+    cursor = connect.cursor(dictionary=True)
+    try:
+        _ensure_phase_b_columns(cursor, connect)
+        ip_hash = _hash_client_ip(request)
+        if not _check_serverless_rate_limit(cursor, connect, "lookup", ip_hash, max_hits=15, window_sec=600):
+            return {"status": "Failed", "message": "คุณค้นหาข้อมูลบ่อยเกินไป กรุณารอสักครู่แล้วลองใหม่"}
+
+        cond_sql, ref_val = _parse_booking_ref_condition(req.BookingRef)
+        cursor.execute(
+            f"""
+            SELECT a.AppointmentID, a.BookingRef, a.AppointmentDate, a.AppointmentTime,
+                   a.ServiceType, a.EstimatedMinutes, a.Mileage, a.Notes, a.Status,
+                   c.CustomerName, c.PhoneNumber,
+                   v.CarBrand, v.CarModel, v.CarYear, v.CarNumber
+            FROM Appointments a
+            JOIN Customers c ON a.CustomerID = c.CustomerID
+            JOIN Vehicles v ON a.VehicleID = v.VehicleID
+            WHERE {cond_sql} AND c.PhoneNumber = %s
+            LIMIT 1
+            """,
+            (ref_val, req.PhoneNumber)
+        )
+        appt = cursor.fetchone()
+        if not appt:
+            return {"status": "Failed", "message": "ไม่พบข้อมูลการจองคิว กรุณาตรวจสอบรหัสการจองและเบอร์โทรศัพท์"}
+
+        appt["AppointmentDate"] = str(appt["AppointmentDate"])
+        appt["AppointmentTime"] = str(appt["AppointmentTime"])[:5]
+        appt["BookingRef"] = appt.get("BookingRef") or f"BK-{appt['AppointmentID']}"
+        return {"status": "Success", "data": appt}
+    except mysql.connector.Error as e:
+        _log_db_error("lookup_booking", e)
+        return {"status": "Failed", "message": "ไม่สามารถค้นหาข้อมูลการจองได้"}
+    finally:
+        cursor.close()
+        connect.close()
+
+
+@app.put("/bookings/reschedule")
+def reschedule_booking(req: BookingRescheduleRequest, request: Request = None):
+    """ให้ลูกค้าเลื่อนวัน-เวลานัดหมายด้วยรหัสการจองและเบอร์โทรศัพท์"""
+    lead_ok, lead_msg = _check_lead_time_valid(req.AppointmentDate, req.AppointmentTime)
+    if not lead_ok:
+        return {"status": "Failed", "message": lead_msg}
+
+    connect = get_data_connection()
+    if not connect:
+        return {"status": "Failed", "message": "ไม่สามารถเชื่อมต่อฐานข้อมูลได้"}
+
+    cursor = connect.cursor()
+    try:
+        _ensure_phase_b_columns(cursor, connect)
+        ip_hash = _hash_client_ip(request)
+        if not _check_serverless_rate_limit(cursor, connect, "reschedule", ip_hash, max_hits=10, window_sec=600):
+            return {"status": "Failed", "message": "คุณส่งคำขอบ่อยเกินไป กรุณารอสักครู่แล้วลองใหม่"}
+
+        cond_sql, ref_val = _parse_booking_ref_condition(req.BookingRef)
+        cursor.execute(
+            f"""
+            SELECT a.AppointmentID, a.Status
+            FROM Appointments a
+            JOIN Customers c ON a.CustomerID = c.CustomerID
+            WHERE {cond_sql} AND c.PhoneNumber = %s
+            LIMIT 1
+            """,
+            (ref_val, req.PhoneNumber)
+        )
+        row = cursor.fetchone()
+        if not row:
+            return {"status": "Failed", "message": "ไม่พบข้อมูลการจองคิว กรุณาตรวจสอบรหัสการจองและเบอร์โทรศัพท์"}
+
+        appt_id, current_status = row[0], row[1]
+        if current_status not in ("Pending", "Confirmed"):
+            return {"status": "Failed", "message": f"ไม่สามารถเลื่อนนัดหมายได้ เนื่องจากสถานะปัจจุบันคือ {current_status}"}
+
+        slot_time_sql = f"{req.AppointmentTime}:00"
+        cursor.execute(
+            """
+            SELECT COUNT(*) FROM Appointments
+            WHERE AppointmentDate = %s AND AppointmentTime = %s
+              AND AppointmentID != %s
+              AND Status IN ('Pending', 'Confirmed', 'In Progress', 'Ready')
+            FOR UPDATE
+            """,
+            (req.AppointmentDate, slot_time_sql, appt_id)
+        )
+        slot_row = cursor.fetchone()
+        if slot_row and int(slot_row[0]) >= _MAX_CARS_PER_SLOT:
+            connect.rollback()
+            return {"status": "Failed", "message": "คิวซ่อมในวันและเวลาใหม่ที่เลือกเต็มแล้ว กรุณาเลือกเวลาอื่น"}
+
+        cursor.execute(
+            "UPDATE Appointments SET AppointmentDate = %s, AppointmentTime = %s WHERE AppointmentID = %s",
+            (req.AppointmentDate, slot_time_sql, appt_id)
+        )
+        connect.commit()
+        return {"status": "Success", "message": "เลื่อนวัน-เวลานัดหมายสำเร็จเรียบร้อยแล้ว"}
+    except mysql.connector.Error as e:
+        connect.rollback()
+        _log_db_error("reschedule_booking", e)
+        return {"status": "Failed", "message": "ไม่สามารถเลื่อนนัดหมายได้"}
+    finally:
+        cursor.close()
+        connect.close()
+
+
+@app.put("/bookings/cancel")
+def cancel_booking_by_customer(req: BookingLookupRequest, request: Request = None):
+    """ให้ลูกค้ายกเลิกนัดหมายล่วงหน้าด้วยรหัสการจองและเบอร์โทรศัพท์"""
+    connect = get_data_connection()
+    if not connect:
+        return {"status": "Failed", "message": "ไม่สามารถเชื่อมต่อฐานข้อมูลได้"}
+
+    cursor = connect.cursor()
+    try:
+        _ensure_phase_b_columns(cursor, connect)
+        cond_sql, ref_val = _parse_booking_ref_condition(req.BookingRef)
+        cursor.execute(
+            f"""
+            SELECT a.AppointmentID, a.Status
+            FROM Appointments a
+            JOIN Customers c ON a.CustomerID = c.CustomerID
+            WHERE {cond_sql} AND c.PhoneNumber = %s
+            LIMIT 1
+            """,
+            (ref_val, req.PhoneNumber)
+        )
+        row = cursor.fetchone()
+        if not row:
+            return {"status": "Failed", "message": "ไม่พบข้อมูลการจองคิว กรุณาตรวจสอบรหัสการจองและเบอร์โทรศัพท์"}
+
+        appt_id, current_status = row[0], row[1]
+        if current_status not in ("Pending", "Confirmed"):
+            return {"status": "Failed", "message": f"ไม่สามารถยกเลิกนัดหมายได้ เนื่องจากสถานะปัจจุบันคือ {current_status}"}
+
+        cursor.execute(
+            "UPDATE Appointments SET Status = 'Cancelled' WHERE AppointmentID = %s",
+            (appt_id,)
+        )
+        connect.commit()
+        return {"status": "Success", "message": "ยกเลิกคิวนัดหมายเรียบร้อยแล้ว"}
+    except mysql.connector.Error as e:
+        connect.rollback()
+        _log_db_error("cancel_booking_by_customer", e)
+        return {"status": "Failed", "message": "ไม่สามารถยกเลิกนัดหมายได้"}
     finally:
         cursor.close()
         connect.close()
@@ -837,7 +1134,7 @@ def retry_failed_notifications():
         _ensure_phase_b_columns(cursor, connect)
         cursor.execute(
             """
-            SELECT a.AppointmentID, a.AppointmentDate, a.AppointmentTime, a.ServiceType,
+            SELECT a.AppointmentID, a.BookingRef, a.AppointmentDate, a.AppointmentTime, a.ServiceType,
                    v.CarBrand, v.CarModel, v.CarNumber
             FROM Appointments a
             JOIN Vehicles v ON a.VehicleID = v.VehicleID
@@ -851,8 +1148,9 @@ def retry_failed_notifications():
         sent = 0
         for r in rows:
             retried += 1
+            ref_code = r.get("BookingRef") or f"BK-{r['AppointmentID']}"
             status = _send_line_push(
-                r["AppointmentID"],
+                ref_code,
                 r["CarBrand"],
                 r["CarModel"],
                 r["CarNumber"],
@@ -889,10 +1187,11 @@ def get_appointments():
     try:
         _ensure_phase_b_columns(cursor, connect)
         query = """
-            SELECT a.AppointmentID, a.AppointmentDate, a.AppointmentTime, a.ServiceType, a.Notes, a.Status,
+            SELECT a.AppointmentID, a.BookingRef, a.AppointmentDate, a.AppointmentTime, a.ServiceType,
+                   a.EstimatedMinutes, a.Mileage, a.Notes, a.InternalNotes, a.PhotoURL, a.Status,
                    a.CreatedAtUTC, a.ConsentAtUTC, a.ConsentVersion, a.NotificationStatus,
-                   c.CustomerName, c.PhoneNumber,
-                   v.CarBrand, v.CarModel, v.CarNumber
+                   c.CustomerName, c.PhoneNumber, c.Email, c.LineID,
+                   v.CarBrand, v.CarModel, v.CarYear, v.CarNumber
             FROM Appointments a
             JOIN Customers c ON a.CustomerID = c.CustomerID
             JOIN Vehicles v ON a.VehicleID = v.VehicleID
@@ -904,6 +1203,7 @@ def get_appointments():
         for appt in appointments:
             appt['AppointmentDate'] = str(appt['AppointmentDate'])
             appt['AppointmentTime'] = str(appt['AppointmentTime'])
+            appt['BookingRef'] = appt.get('BookingRef') or f"BK-{appt['AppointmentID']}"
             appt['CreatedAtBangkok'] = _utc_to_bangkok_str(appt.get('CreatedAtUTC'))
             appt['ConsentAtBangkok'] = _utc_to_bangkok_str(appt.get('ConsentAtUTC'))
             if 'CreatedAtUTC' in appt and appt['CreatedAtUTC'] is not None:
@@ -939,7 +1239,7 @@ def accept_appointment(appointment_id: int = Path(..., gt=0)):
         row = cursor.fetchone()
         if not row:
             return {"status": "Failed", "message": "ไม่พบรายการนัดหมายนี้"}
-        if row[0] != "Pending":
+        if row[0] not in ("Pending", "Confirmed"):
             return {"status": "Failed", "message": "รายการนัดหมายนี้ถูกรับรถเข้าซ่อมไปแล้ว"}
 
         cursor.execute(
@@ -948,9 +1248,14 @@ def accept_appointment(appointment_id: int = Path(..., gt=0)):
         )
 
         cursor.execute(
-            "INSERT INTO Service_Jobs (AppointmentID, MechanicName, JobStatus) VALUES (%s, %s, 'In Progress')",
-            (appointment_id, 'ช่างประจำศูนย์')
+            "SELECT JobID FROM Service_Jobs WHERE AppointmentID = %s LIMIT 1",
+            (appointment_id,)
         )
+        if not cursor.fetchone():
+            cursor.execute(
+                "INSERT INTO Service_Jobs (AppointmentID, MechanicName, JobStatus) VALUES (%s, %s, 'In Progress')",
+                (appointment_id, 'ช่างประจำศูนย์')
+            )
 
         connect.commit()
         return {"status": "Success", "message": "รับรถเข้าซ่อมสำเร็จ"}
@@ -959,6 +1264,56 @@ def accept_appointment(appointment_id: int = Path(..., gt=0)):
         connect.rollback()
         _log_db_error("accept_appointment", e)
         return {"status": "Failed", "message": "ไม่สามารถอัปเดตสถานะการรับรถได้"}
+    finally:
+        cursor.close()
+        connect.close()
+
+
+@app.put("/appointments/{appointment_id}/status")
+def update_appointment_status(req: StatusUpdateRequest, appointment_id: int = Path(..., gt=0)):
+    """เปลี่ยนสถานะคิวนัดหมายตามวงจรงานซ่อม และบันทึกหมายเหตุภายในสำหรับช่าง"""
+    connect = get_data_connection()
+    if not connect:
+        return {"status": "Failed", "message": "Database connection error"}
+
+    cursor = connect.cursor()
+    try:
+        _ensure_phase_b_columns(cursor, connect)
+        cursor.execute("SELECT AppointmentID FROM Appointments WHERE AppointmentID = %s LIMIT 1", (appointment_id,))
+        if not cursor.fetchone():
+            return {"status": "Failed", "message": "ไม่พบรายการนัดหมายนี้"}
+
+        if req.InternalNotes is not None:
+            cursor.execute(
+                "UPDATE Appointments SET Status = %s, InternalNotes = %s WHERE AppointmentID = %s",
+                (req.Status, req.InternalNotes, appointment_id)
+            )
+        else:
+            cursor.execute(
+                "UPDATE Appointments SET Status = %s WHERE AppointmentID = %s",
+                (req.Status, appointment_id)
+            )
+
+        # หากเปลี่ยนเป็น In Progress และยังไม่มีใบงานใน Service_Jobs ให้สร้างใบงานอัตโนมัติ
+        if req.Status == "In Progress":
+            cursor.execute("SELECT JobID FROM Service_Jobs WHERE AppointmentID = %s LIMIT 1", (appointment_id,))
+            if not cursor.fetchone():
+                cursor.execute(
+                    "INSERT INTO Service_Jobs (AppointmentID, MechanicName, JobStatus) VALUES (%s, %s, 'In Progress')",
+                    (appointment_id, 'ช่างประจำศูนย์')
+                )
+        elif req.Status in ("Ready", "Completed", "Cancelled"):
+            cursor.execute(
+                "UPDATE Service_Jobs SET JobStatus = %s WHERE AppointmentID = %s",
+                (req.Status, appointment_id)
+            )
+
+        connect.commit()
+        return {"status": "Success", "message": "อัปเดตสถานะนัดหมายเรียบร้อยแล้ว"}
+    except mysql.connector.Error as e:
+        connect.rollback()
+        _log_db_error("update_appointment_status", e)
+        return {"status": "Failed", "message": "ไม่สามารถอัปเดตสถานะได้"}
     finally:
         cursor.close()
         connect.close()
@@ -975,9 +1330,11 @@ def get_jobs():
 
     cursor = connect.cursor(dictionary=True)
     try:
+        _ensure_phase_b_columns(cursor, connect)
         query = """
-            SELECT j.JobID, j.MechanicName, j.JobStatus, j.TotalCost,
-                   v.CarBrand, v.CarModel, v.CarNumber, c.CustomerName
+            SELECT j.JobID, j.AppointmentID, j.MechanicName, j.JobStatus, j.InternalNotes, j.TotalCost,
+                   a.BookingRef, a.ServiceType, a.AppointmentDate,
+                   v.CarBrand, v.CarModel, v.CarYear, v.CarNumber, c.CustomerName, c.PhoneNumber
             FROM Service_Jobs j
             JOIN Appointments a ON j.AppointmentID = a.AppointmentID
             JOIN Vehicles v ON a.VehicleID = v.VehicleID
@@ -985,13 +1342,60 @@ def get_jobs():
             ORDER BY j.JobID DESC
         """
         cursor.execute(query)
-        return {"status": "Success", "data": cursor.fetchall()}
+        rows = cursor.fetchall()
+        for r in rows:
+            if "AppointmentDate" in r and r["AppointmentDate"] is not None:
+                r["AppointmentDate"] = str(r["AppointmentDate"])
+        return {"status": "Success", "data": rows}
     except mysql.connector.Error as e:
         _log_db_error("get_jobs", e)
         return {"status": "Failed", "message": "ไม่สามารถดึงข้อมูลใบงานซ่อมได้", "data": []}
     finally:
         cursor.close()
         connect.close()
+
+
+@app.put("/jobs/{job_id}/status")
+def update_job_status(req: StatusUpdateRequest, job_id: int = Path(..., gt=0)):
+    """อัปเดตสถานะใบงานซ่อมและหมายเหตุช่าง พร้อมซิงก์สถานะกลับไปยังตารางนัดหมาย"""
+    connect = get_data_connection()
+    if not connect:
+        return {"status": "Failed", "message": "Database connection error"}
+
+    cursor = connect.cursor()
+    try:
+        _ensure_phase_b_columns(cursor, connect)
+        cursor.execute("SELECT AppointmentID FROM Service_Jobs WHERE JobID = %s LIMIT 1", (job_id,))
+        row = cursor.fetchone()
+        if not row:
+            return {"status": "Failed", "message": "ไม่พบใบงานซ่อมนี้"}
+        appt_id = row[0]
+
+        if req.InternalNotes is not None:
+            cursor.execute(
+                "UPDATE Service_Jobs SET JobStatus = %s, InternalNotes = %s WHERE JobID = %s",
+                (req.Status, req.InternalNotes, job_id)
+            )
+        else:
+            cursor.execute(
+                "UPDATE Service_Jobs SET JobStatus = %s WHERE JobID = %s",
+                (req.Status, job_id)
+            )
+
+        cursor.execute(
+            "UPDATE Appointments SET Status = %s WHERE AppointmentID = %s",
+            (req.Status, appt_id)
+        )
+        connect.commit()
+        return {"status": "Success", "message": "อัปเดตสถานะใบงานซ่อมเรียบร้อยแล้ว"}
+    except mysql.connector.Error as e:
+        connect.rollback()
+        _log_db_error("update_job_status", e)
+        return {"status": "Failed", "message": "ไม่สามารถอัปเดตสถานะใบงานได้"}
+    finally:
+        cursor.close()
+        connect.close()
+
 
 @app.post("/jobs/{job_id}/items")
 def add_job_item(item: ServiceItemCreate, job_id: int = Path(..., gt=0)):
@@ -1127,23 +1531,25 @@ def export_admin_csv(resource: str):
         writer = csv.writer(output)
 
         if resource == "customers":
-            cursor.execute("SELECT CustomerID, CustomerName, PhoneNumber, Email, Address, CustomerTier FROM Customers ORDER BY CustomerID DESC")
-            writer.writerow(["รหัสลูกค้า", "ชื่อ-นามสกุล", "เบอร์โทรศัพท์", "อีเมล", "ที่อยู่", "ระดับสมาชิก"])
+            cursor.execute("SELECT CustomerID, CustomerName, PhoneNumber, Email, LineID, Address, CustomerTier FROM Customers ORDER BY CustomerID DESC")
+            writer.writerow(["รหัสลูกค้า", "ชื่อ-นามสกุล", "เบอร์โทรศัพท์", "อีเมล", "LINE ID", "ที่อยู่", "ระดับสมาชิก"])
             for r in cursor.fetchall():
                 writer.writerow([
                     _safe_csv_cell(r.get("CustomerID")),
                     _safe_csv_cell(r.get("CustomerName")),
                     _safe_csv_cell(r.get("PhoneNumber")),
                     _safe_csv_cell(r.get("Email")),
+                    _safe_csv_cell(r.get("LineID")),
                     _safe_csv_cell(r.get("Address")),
                     _safe_csv_cell(r.get("CustomerTier")),
                 ])
         elif resource == "appointments":
             cursor.execute(
                 """
-                SELECT a.AppointmentID, a.AppointmentDate, a.AppointmentTime, a.ServiceType, a.Notes,
+                SELECT a.AppointmentID, a.BookingRef, a.AppointmentDate, a.AppointmentTime, a.ServiceType,
+                       a.EstimatedMinutes, a.Mileage, a.Notes, a.InternalNotes,
                        a.Status, a.CreatedAtUTC, a.ConsentVersion, a.NotificationStatus,
-                       c.CustomerName, c.PhoneNumber, v.CarBrand, v.CarModel, v.CarNumber
+                       c.CustomerName, c.PhoneNumber, v.CarBrand, v.CarModel, v.CarYear, v.CarNumber
                 FROM Appointments a
                 JOIN Customers c ON a.CustomerID = c.CustomerID
                 JOIN Vehicles v ON a.VehicleID = v.VehicleID
@@ -1151,22 +1557,28 @@ def export_admin_csv(resource: str):
                 """
             )
             writer.writerow([
-                "รหัสนัดหมาย", "วันที่นัด", "เวลานัด", "ชื่อลูกค้า", "เบอร์โทรศัพท์",
-                "ยี่ห้อรถ", "รุ่นรถ", "ทะเบียนรถ", "ประเภทบริการ", "หมายเหตุ",
+                "รหัสนัดหมาย", "รหัสอ้างอิง", "วันที่นัด", "เวลานัด", "ชื่อลูกค้า", "เบอร์โทรศัพท์",
+                "ยี่ห้อรถ", "รุ่นรถ", "ปีรถ", "ทะเบียนรถ", "เลขไมล์ (กม.)", "ประเภทบริการ",
+                "เวลาประเมิน (นาที)", "อาการที่แจ้ง", "หมายเหตุช่าง",
                 "สถานะ", "เวลาที่จอง (Asia/Bangkok)", "เวอร์ชัน PDPA", "สถานะแจ้งเตือน"
             ])
             for r in cursor.fetchall():
                 writer.writerow([
                     _safe_csv_cell(r.get("AppointmentID")),
+                    _safe_csv_cell(r.get("BookingRef") or f"BK-{r.get('AppointmentID')}"),
                     _safe_csv_cell(r.get("AppointmentDate")),
                     _safe_csv_cell(r.get("AppointmentTime")),
                     _safe_csv_cell(r.get("CustomerName")),
                     _safe_csv_cell(r.get("PhoneNumber")),
                     _safe_csv_cell(r.get("CarBrand")),
                     _safe_csv_cell(r.get("CarModel")),
+                    _safe_csv_cell(r.get("CarYear")),
                     _safe_csv_cell(r.get("CarNumber")),
+                    _safe_csv_cell(r.get("Mileage")),
                     _safe_csv_cell(r.get("ServiceType")),
+                    _safe_csv_cell(r.get("EstimatedMinutes")),
                     _safe_csv_cell(r.get("Notes")),
+                    _safe_csv_cell(r.get("InternalNotes")),
                     _safe_csv_cell(r.get("Status")),
                     _safe_csv_cell(_utc_to_bangkok_str(r.get("CreatedAtUTC"))),
                     _safe_csv_cell(r.get("ConsentVersion")),
@@ -1175,7 +1587,7 @@ def export_admin_csv(resource: str):
         else:
             cursor.execute(
                 """
-                SELECT j.JobID, j.MechanicName, j.JobStatus, j.TotalCost,
+                SELECT j.JobID, j.MechanicName, j.JobStatus, j.InternalNotes, j.TotalCost,
                        v.CarBrand, v.CarModel, v.CarNumber, c.CustomerName
                 FROM Service_Jobs j
                 JOIN Appointments a ON j.AppointmentID = a.AppointmentID
@@ -1184,7 +1596,7 @@ def export_admin_csv(resource: str):
                 ORDER BY j.JobID DESC
                 """
             )
-            writer.writerow(["รหัสใบงาน", "ชื่อลูกค้า", "ยี่ห้อรถ", "รุ่นรถ", "ทะเบียนรถ", "ช่างผู้รับผิดชอบ", "สถานะงานซ่อม", "ยอดรวม (บาท)"])
+            writer.writerow(["รหัสใบงาน", "ชื่อลูกค้า", "ยี่ห้อรถ", "รุ่นรถ", "ทะเบียนรถ", "ช่างผู้รับผิดชอบ", "สถานะงานซ่อม", "หมายเหตุช่าง", "ยอดรวม (บาท)"])
             for r in cursor.fetchall():
                 writer.writerow([
                     f"JOB-{r.get('JobID')}",
@@ -1194,6 +1606,7 @@ def export_admin_csv(resource: str):
                     _safe_csv_cell(r.get("CarNumber")),
                     _safe_csv_cell(r.get("MechanicName")),
                     _safe_csv_cell(r.get("JobStatus")),
+                    _safe_csv_cell(r.get("InternalNotes")),
                     _safe_csv_cell(r.get("TotalCost")),
                 ])
 
