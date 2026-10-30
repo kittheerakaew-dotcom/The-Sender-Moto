@@ -54,3 +54,10 @@ CREATE TABLE IF NOT EXISTS Service_Items (
     UnitPrice DECIMAL(10, 2) NOT NULL,
     FOREIGN KEY (JobID) REFERENCES Service_Jobs(JobID) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- ตารางเก็บ Rate Limit และ Login Throttling สำหรับ Serverless (ไม่ต้องพึ่ง In-Memory State)
+CREATE TABLE IF NOT EXISTS Rate_Limits (
+    RateKey VARCHAR(100) PRIMARY KEY,
+    HitCount INT NOT NULL DEFAULT 1,
+    WindowStart BIGINT NOT NULL
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
