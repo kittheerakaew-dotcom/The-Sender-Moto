@@ -21,3 +21,4 @@ frontend/build/
 *.pem
 *.sql.bak
 *.dump.sql
+backups/
