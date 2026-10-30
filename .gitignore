@@ -1,0 +1,23 @@
+# Environment variables & secrets
+.env
+.env.*
+!.env.example
+
+# Python virtual environment & cache
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Next.js frontend sub-repo build artifacts
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/build/
+
+# Vercel & IDE
+.vercel/
+.DS_Store
+*.pem
+*.sql.bak
+*.dump.sql
