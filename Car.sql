@@ -32,7 +32,14 @@ CREATE TABLE IF NOT EXISTS Appointments (
     ServiceType VARCHAR(100) NOT NULL,
     Notes TEXT,
     Status VARCHAR(50) DEFAULT 'Pending',
+    CreatedAtUTC DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    ConsentAtUTC DATETIME DEFAULT NULL,
+    ConsentVersion VARCHAR(20) DEFAULT 'v1.0',
+    IdempotencyKey VARCHAR(64) DEFAULT NULL,
+    NotificationStatus VARCHAR(30) DEFAULT 'Pending',
+    UNIQUE INDEX idx_appointments_idempotency (IdempotencyKey),
     INDEX idx_appointments_datetime (AppointmentDate, AppointmentTime),
+    INDEX idx_appointments_notify_status (NotificationStatus),
     FOREIGN KEY (CustomerID) REFERENCES Customers(CustomerID) ON DELETE CASCADE,
     FOREIGN KEY (VehicleID) REFERENCES Vehicles(VehicleID) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

@@ -1,6 +1,6 @@
 from fastapi import FastAPI, Request, Path
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 import mysql.connector
 from database import get_data_connection
 from schemas import (
@@ -19,6 +19,11 @@ import hmac
 import hashlib
 import base64
 import json
+import csv
+import io
+import urllib.request
+import urllib.error
+from datetime import datetime, timezone, timedelta
 
 _IS_PROD = (
     os.getenv("APP_ENV", "development").lower() == "production"
@@ -52,6 +57,8 @@ app.add_middleware(
 
 _SESSION_COOKIE_NAME = "sender_admin_session"
 _SESSION_TTL_SECONDS = 8 * 3600  # อายุเซสชัน 8 ชั่วโมง
+_BANGKOK_TZ = timezone(timedelta(hours=7))
+_schema_checked = False
 
 
 def _get_session_secret() -> bytes:
@@ -123,6 +130,12 @@ def _is_admin_auth_configured() -> bool:
 
 
 def _is_request_authorized(request: Request) -> bool:
+    # รองรับ Vercel Cron Secret สำหรับ Endpoint /notifications/retry
+    cron_secret = os.getenv("CRON_SECRET", "").strip()
+    auth_header = request.headers.get("Authorization", "").strip()
+    if cron_secret and auth_header == f"Bearer {cron_secret}":
+        return True
+
     if not _is_admin_auth_configured():
         return True
 
@@ -131,7 +144,7 @@ def _is_request_authorized(request: Request) -> bool:
     if cookie_token and _verify_session_token(cookie_token):
         return True
 
-    # 2. ตรวจจาก Header X-Admin-Key (รองรับทั้ง Session Token และรหัสผ่านเมื่อเรียกข้ามพอร์ตตอนพัฒนา)
+    # 2. ตรวจจาก Header X-Admin-Key
     header_token = request.headers.get("X-Admin-Key", "").strip()
     if header_token:
         if _verify_session_token(header_token) or _verify_password(header_token):
@@ -147,6 +160,75 @@ def _hash_client_ip(request: Request | None) -> str:
         raw_ip = forwarded.split(",")[0].strip() if forwarded else request.client.host
     # แฮช IP ก่อนเก็บลงฐานข้อมูลเพื่อไม่เก็บข้อมูลส่วนบุคคล (PDPA)
     return hashlib.sha256(f"sender-moto-rate:{raw_ip}".encode("utf-8")).hexdigest()[:32]
+
+
+def _ensure_phase_b_columns(cursor, connect):
+    """ตรวจสอบและเพิ่มคอลัมน์ใหม่ใน Appointments แบบ Idempotent (รองรับทั้ง MySQL 8 และ TiDB)"""
+    global _schema_checked
+    if _schema_checked:
+        return
+    try:
+        cursor.execute("SHOW COLUMNS FROM Appointments")
+        existing_cols = {row[0].lower() for row in cursor.fetchall()}
+        alters = [
+            ("createdatutc", "ALTER TABLE Appointments ADD COLUMN CreatedAtUTC DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP"),
+            ("consentatutc", "ALTER TABLE Appointments ADD COLUMN ConsentAtUTC DATETIME DEFAULT NULL"),
+            ("consentversion", "ALTER TABLE Appointments ADD COLUMN ConsentVersion VARCHAR(20) DEFAULT 'v1.0'"),
+            ("idempotencykey", "ALTER TABLE Appointments ADD COLUMN IdempotencyKey VARCHAR(64) DEFAULT NULL"),
+            ("notificationstatus", "ALTER TABLE Appointments ADD COLUMN NotificationStatus VARCHAR(30) DEFAULT 'Pending'"),
+        ]
+        for col_lower, sql in alters:
+            if col_lower not in existing_cols:
+                cursor.execute(sql)
+        connect.commit()
+        _schema_checked = True
+    except mysql.connector.Error:
+        pass
+
+
+def _utc_to_bangkok_str(dt_val) -> str | None:
+    if dt_val is None:
+        return None
+    if isinstance(dt_val, datetime):
+        utc_dt = dt_val.replace(tzinfo=timezone.utc) if dt_val.tzinfo is None else dt_val.astimezone(timezone.utc)
+        return utc_dt.astimezone(_BANGKOK_TZ).strftime("%Y-%m-%d %H:%M:%S")
+    return str(dt_val)
+
+
+def _send_line_push(booking_id: int, brand: str, model: str, plate: str, appt_date: str, appt_time: str, service_type: str) -> str:
+    """ส่งแจ้งเตือนเข้า LINE Messaging API (ถ้าตั้งค่าไว้) โดยไม่ทำให้การจองล้มเหลวหากส่งไม่สำเร็จ"""
+    token = os.getenv("LINE_CHANNEL_ACCESS_TOKEN", "").strip()
+    target_id = os.getenv("LINE_ADMIN_USER_ID", "").strip()
+    if not token or not target_id:
+        return "Skipped"
+
+    text_msg = (
+        f"[The Sender Moto] มีคิวจองใหม่ #BK-{booking_id}\n"
+        f"รถ: {brand} {model} ({plate})\n"
+        f"บริการ: {service_type}\n"
+        f"วัน-เวลา: {appt_date} {appt_time} น."
+    )
+    payload = json.dumps({
+        "to": target_id,
+        "messages": [{"type": "text", "text": text_msg}],
+    }).encode("utf-8")
+
+    req = urllib.request.Request(
+        "https://api.line.me/v2/bot/message/push",
+        data=payload,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {token}",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            if 200 <= resp.status < 300:
+                return "Sent"
+            return "Failed"
+    except Exception:
+        return "Failed"
 
 
 def _check_serverless_rate_limit(cursor, connect, scope: str, ip_hash: str, max_hits: int, window_sec: int) -> bool:
@@ -196,10 +278,19 @@ def _check_serverless_rate_limit(cursor, connect, scope: str, ip_hash: str, max_
 
 
 def _log_db_error(context: str, err: mysql.connector.Error):
-    # บันทึกเฉพาะรหัสข้อผิดพลาดของฐานข้อมูลโดยไม่พิมพ์ข้อมูลส่วนบุคคลของลูกค้าลง Log
+    # บันทึกเฉพาะรหัสข้อผิดพลาดของฐานข้อมูลโดยไม่พิมพ์ข้อมูลส่วนบุคคลของลูกค้าลง Log (PDPA)
     errno = getattr(err, "errno", "unknown")
     sqlstate = getattr(err, "sqlstate", "unknown")
     print(f"DB Error in {context}: errno={errno} sqlstate={sqlstate}")
+
+
+def _safe_csv_cell(val) -> str:
+    if val is None:
+        return ""
+    text = str(val)
+    if text and text[0] in ("=", "+", "-", "@"):
+        return "'" + text
+    return text
 
 
 @app.exception_handler(RequestValidationError)
@@ -608,12 +699,28 @@ def create_booking(booking: BookingCreate, request: Request = None):
 
     cursor = connect.cursor()
     try:
-        # 2. จำกัดอัตราการยิงต่อ IP ผ่านตาราง Rate_Limits ในฐานข้อมูล (รองรับ Serverless 100%)
+        _ensure_phase_b_columns(cursor, connect)
+
+        # 2. ตรวจสอบ IdempotencyKey ก่อน เพื่อป้องกันการกดส่งซ้ำโดยไม่สร้างคิวซ้ำ
+        if booking.IdempotencyKey:
+            cursor.execute(
+                "SELECT AppointmentID FROM Appointments WHERE IdempotencyKey = %s LIMIT 1",
+                (booking.IdempotencyKey,)
+            )
+            idem_row = cursor.fetchone()
+            if idem_row:
+                return {
+                    "status": "Success",
+                    "message": "จองคิวสำเร็จ",
+                    "booking_id": idem_row[0],
+                }
+
+        # 3. จำกัดอัตราการยิงต่อ IP ผ่านตาราง Rate_Limits ในฐานข้อมูล (รองรับ Serverless 100%)
         ip_hash = _hash_client_ip(request)
         if not _check_serverless_rate_limit(cursor, connect, "booking", ip_hash, max_hits=5, window_sec=600):
             return {"status": "Failed", "message": "คุณส่งคำขอจองคิวบ่อยเกินไป กรุณารอสักครู่แล้วลองใหม่อีกครั้ง"}
 
-        # 3. ตรวจสอบว่ามีลูกค้าที่ใช้เบอร์โทรศัพท์นี้อยู่แล้วหรือไม่ เพื่อลดข้อมูลซ้ำซ้อน
+        # 4. ตรวจสอบว่ามีลูกค้าที่ใช้เบอร์โทรศัพท์นี้อยู่แล้วหรือไม่ เพื่อลดข้อมูลซ้ำซ้อน
         cursor.execute(
             "SELECT CustomerID FROM Customers WHERE PhoneNumber = %s LIMIT 1",
             (booking.PhoneNumber,)
@@ -628,7 +735,7 @@ def create_booking(booking: BookingCreate, request: Request = None):
             )
             customer_id = cursor.lastrowid
 
-        # 4. ตรวจสอบว่ารถทะเบียนนี้ของลูกค้ารายนี้มีในระบบแล้วหรือไม่
+        # 5. ตรวจสอบว่ารถทะเบียนนี้ของลูกค้ารายนี้มีในระบบแล้วหรือไม่
         cursor.execute(
             "SELECT VehicleID FROM Vehicles WHERE CustomerID = %s AND CarNumber = %s LIMIT 1",
             (customer_id, booking.CarNumber)
@@ -645,7 +752,7 @@ def create_booking(booking: BookingCreate, request: Request = None):
             )
             vehicle_id = cursor.lastrowid
 
-        # 5. ป้องกันการกดจองซ้ำในวันเดียวกันสำหรับรถคันเดิม
+        # 6. ป้องกันการกดจองซ้ำในวันเดียวกันสำหรับรถคันเดิม
         cursor.execute(
             """
             SELECT AppointmentID FROM Appointments
@@ -657,23 +764,113 @@ def create_booking(booking: BookingCreate, request: Request = None):
         if cursor.fetchone():
             return {"status": "Failed", "message": "รถทะเบียนนี้มีคิวนัดหมายในวันที่เลือกไว้แล้ว"}
 
+        now_utc_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
         cursor.execute(
-            "INSERT INTO Appointments (CustomerID, VehicleID, AppointmentDate, AppointmentTime, ServiceType, Notes, Status) VALUES (%s, %s, %s, %s, %s, %s, 'Pending')",
-            (customer_id, vehicle_id, booking.AppointmentDate, f"{booking.AppointmentTime}:00", booking.ServiceType, booking.Notes)
+            """
+            INSERT INTO Appointments (
+                CustomerID, VehicleID, AppointmentDate, AppointmentTime, ServiceType,
+                Notes, Status, CreatedAtUTC, ConsentAtUTC, ConsentVersion, IdempotencyKey, NotificationStatus
+            ) VALUES (%s, %s, %s, %s, %s, %s, 'Pending', %s, %s, %s, %s, 'Pending')
+            """,
+            (
+                customer_id,
+                vehicle_id,
+                booking.AppointmentDate,
+                f"{booking.AppointmentTime}:00",
+                booking.ServiceType,
+                booking.Notes,
+                now_utc_str,
+                now_utc_str if booking.ConsentPDPA else None,
+                booking.ConsentVersion,
+                booking.IdempotencyKey,
+            )
         )
         appointment_id = cursor.lastrowid
 
+        # บันทึกข้อมูลการจองลงฐานข้อมูลให้สำเร็จก่อนเสมอ (Save Booking FIRST)
         connect.commit()
+
+        # 7. ส่งการแจ้งเตือนภายหลัง Commit (หากส่งไม่สำเร็จจะไม่กระทบคิวที่จองไว้แล้ว)
+        notify_status = _send_line_push(
+            appointment_id,
+            booking.CarBrand,
+            booking.CarModel,
+            booking.CarNumber,
+            booking.AppointmentDate,
+            booking.AppointmentTime,
+            booking.ServiceType,
+        )
+        try:
+            cursor.execute(
+                "UPDATE Appointments SET NotificationStatus = %s WHERE AppointmentID = %s",
+                (notify_status, appointment_id)
+            )
+            connect.commit()
+        except mysql.connector.Error:
+            pass
+
         return {
             "status": "Success",
             "message": "จองคิวสำเร็จ",
             "booking_id": appointment_id,
+            "notification_status": notify_status,
         }
 
     except mysql.connector.Error as e:
         connect.rollback()
         _log_db_error("create_booking", e)
         return {"status": "Failed", "message": "เกิดข้อผิดพลาดในการบันทึกคิวซ่อม กรุณาลองใหม่อีกครั้ง"}
+    finally:
+        cursor.close()
+        connect.close()
+
+
+@app.post("/notifications/retry")
+def retry_failed_notifications():
+    """ส่งแจ้งเตือนซ้ำสำหรับรายการที่ NotificationStatus = 'Failed' (เรียกผ่าน Admin หรือ Vercel Cron ได้)"""
+    connect = get_data_connection()
+    if not connect:
+        return {"status": "Failed", "message": "Database connection error"}
+
+    cursor = connect.cursor(dictionary=True)
+    try:
+        _ensure_phase_b_columns(cursor, connect)
+        cursor.execute(
+            """
+            SELECT a.AppointmentID, a.AppointmentDate, a.AppointmentTime, a.ServiceType,
+                   v.CarBrand, v.CarModel, v.CarNumber
+            FROM Appointments a
+            JOIN Vehicles v ON a.VehicleID = v.VehicleID
+            WHERE a.NotificationStatus = 'Failed'
+            ORDER BY a.AppointmentID ASC
+            LIMIT 10
+            """
+        )
+        rows = cursor.fetchall()
+        retried = 0
+        sent = 0
+        for r in rows:
+            retried += 1
+            status = _send_line_push(
+                r["AppointmentID"],
+                r["CarBrand"],
+                r["CarModel"],
+                r["CarNumber"],
+                str(r["AppointmentDate"]),
+                str(r["AppointmentTime"])[:5],
+                r["ServiceType"],
+            )
+            cursor.execute(
+                "UPDATE Appointments SET NotificationStatus = %s WHERE AppointmentID = %s",
+                (status, r["AppointmentID"])
+            )
+            if status == "Sent":
+                sent += 1
+        connect.commit()
+        return {"status": "Success", "retried": retried, "sent": sent}
+    except mysql.connector.Error as e:
+        _log_db_error("retry_failed_notifications", e)
+        return {"status": "Failed", "message": "ไม่สามารถส่งแจ้งเตือนซ้ำได้"}
     finally:
         cursor.close()
         connect.close()
@@ -690,8 +887,10 @@ def get_appointments():
     
     cursor = connect.cursor(dictionary=True)
     try:
+        _ensure_phase_b_columns(cursor, connect)
         query = """
             SELECT a.AppointmentID, a.AppointmentDate, a.AppointmentTime, a.ServiceType, a.Notes, a.Status,
+                   a.CreatedAtUTC, a.ConsentAtUTC, a.ConsentVersion, a.NotificationStatus,
                    c.CustomerName, c.PhoneNumber,
                    v.CarBrand, v.CarModel, v.CarNumber
             FROM Appointments a
@@ -705,6 +904,12 @@ def get_appointments():
         for appt in appointments:
             appt['AppointmentDate'] = str(appt['AppointmentDate'])
             appt['AppointmentTime'] = str(appt['AppointmentTime'])
+            appt['CreatedAtBangkok'] = _utc_to_bangkok_str(appt.get('CreatedAtUTC'))
+            appt['ConsentAtBangkok'] = _utc_to_bangkok_str(appt.get('ConsentAtUTC'))
+            if 'CreatedAtUTC' in appt and appt['CreatedAtUTC'] is not None:
+                appt['CreatedAtUTC'] = str(appt['CreatedAtUTC'])
+            if 'ConsentAtUTC' in appt and appt['ConsentAtUTC'] is not None:
+                appt['ConsentAtUTC'] = str(appt['ConsentAtUTC'])
             
         return {"status": "Success", "data": appointments}
     except mysql.connector.Error as e:
@@ -899,6 +1104,108 @@ def complete_job(job_id: int = Path(..., gt=0)):
         connect.rollback()
         _log_db_error("complete_job", e)
         return {"status": "Failed", "message": "ไม่สามารถปิดงานซ่อมได้"}
+    finally:
+        cursor.close()
+        connect.close()
+
+
+@app.get("/admin/export/{resource}")
+def export_admin_csv(resource: str):
+    """ส่งออกข้อมูลเป็นไฟล์ CSV (เข้ารหัส UTF-8 พร้อม BOM เพื่อให้เปิดใน Excel ภาษาไทยไม่เพี้ยน)"""
+    if resource not in ("customers", "appointments", "jobs"):
+        return JSONResponse(status_code=400, content={"status": "Failed", "message": "ประเภทรายงานไม่ถูกต้อง"})
+
+    connect = get_data_connection()
+    if not connect:
+        return JSONResponse(status_code=503, content={"status": "Failed", "message": "Database connection error"})
+
+    cursor = connect.cursor(dictionary=True)
+    try:
+        _ensure_phase_b_columns(cursor, connect)
+        output = io.StringIO()
+        output.write("\ufeff")  # UTF-8 BOM สำหรับ Microsoft Excel
+        writer = csv.writer(output)
+
+        if resource == "customers":
+            cursor.execute("SELECT CustomerID, CustomerName, PhoneNumber, Email, Address, CustomerTier FROM Customers ORDER BY CustomerID DESC")
+            writer.writerow(["รหัสลูกค้า", "ชื่อ-นามสกุล", "เบอร์โทรศัพท์", "อีเมล", "ที่อยู่", "ระดับสมาชิก"])
+            for r in cursor.fetchall():
+                writer.writerow([
+                    _safe_csv_cell(r.get("CustomerID")),
+                    _safe_csv_cell(r.get("CustomerName")),
+                    _safe_csv_cell(r.get("PhoneNumber")),
+                    _safe_csv_cell(r.get("Email")),
+                    _safe_csv_cell(r.get("Address")),
+                    _safe_csv_cell(r.get("CustomerTier")),
+                ])
+        elif resource == "appointments":
+            cursor.execute(
+                """
+                SELECT a.AppointmentID, a.AppointmentDate, a.AppointmentTime, a.ServiceType, a.Notes,
+                       a.Status, a.CreatedAtUTC, a.ConsentVersion, a.NotificationStatus,
+                       c.CustomerName, c.PhoneNumber, v.CarBrand, v.CarModel, v.CarNumber
+                FROM Appointments a
+                JOIN Customers c ON a.CustomerID = c.CustomerID
+                JOIN Vehicles v ON a.VehicleID = v.VehicleID
+                ORDER BY a.AppointmentDate DESC, a.AppointmentTime DESC
+                """
+            )
+            writer.writerow([
+                "รหัสนัดหมาย", "วันที่นัด", "เวลานัด", "ชื่อลูกค้า", "เบอร์โทรศัพท์",
+                "ยี่ห้อรถ", "รุ่นรถ", "ทะเบียนรถ", "ประเภทบริการ", "หมายเหตุ",
+                "สถานะ", "เวลาที่จอง (Asia/Bangkok)", "เวอร์ชัน PDPA", "สถานะแจ้งเตือน"
+            ])
+            for r in cursor.fetchall():
+                writer.writerow([
+                    _safe_csv_cell(r.get("AppointmentID")),
+                    _safe_csv_cell(r.get("AppointmentDate")),
+                    _safe_csv_cell(r.get("AppointmentTime")),
+                    _safe_csv_cell(r.get("CustomerName")),
+                    _safe_csv_cell(r.get("PhoneNumber")),
+                    _safe_csv_cell(r.get("CarBrand")),
+                    _safe_csv_cell(r.get("CarModel")),
+                    _safe_csv_cell(r.get("CarNumber")),
+                    _safe_csv_cell(r.get("ServiceType")),
+                    _safe_csv_cell(r.get("Notes")),
+                    _safe_csv_cell(r.get("Status")),
+                    _safe_csv_cell(_utc_to_bangkok_str(r.get("CreatedAtUTC"))),
+                    _safe_csv_cell(r.get("ConsentVersion")),
+                    _safe_csv_cell(r.get("NotificationStatus")),
+                ])
+        else:
+            cursor.execute(
+                """
+                SELECT j.JobID, j.MechanicName, j.JobStatus, j.TotalCost,
+                       v.CarBrand, v.CarModel, v.CarNumber, c.CustomerName
+                FROM Service_Jobs j
+                JOIN Appointments a ON j.AppointmentID = a.AppointmentID
+                JOIN Vehicles v ON a.VehicleID = v.VehicleID
+                JOIN Customers c ON a.CustomerID = c.CustomerID
+                ORDER BY j.JobID DESC
+                """
+            )
+            writer.writerow(["รหัสใบงาน", "ชื่อลูกค้า", "ยี่ห้อรถ", "รุ่นรถ", "ทะเบียนรถ", "ช่างผู้รับผิดชอบ", "สถานะงานซ่อม", "ยอดรวม (บาท)"])
+            for r in cursor.fetchall():
+                writer.writerow([
+                    f"JOB-{r.get('JobID')}",
+                    _safe_csv_cell(r.get("CustomerName")),
+                    _safe_csv_cell(r.get("CarBrand")),
+                    _safe_csv_cell(r.get("CarModel")),
+                    _safe_csv_cell(r.get("CarNumber")),
+                    _safe_csv_cell(r.get("MechanicName")),
+                    _safe_csv_cell(r.get("JobStatus")),
+                    _safe_csv_cell(r.get("TotalCost")),
+                ])
+
+        filename = f"the_sender_moto_{resource}.csv"
+        return Response(
+            content=output.getvalue().encode("utf-8"),
+            media_type="text/csv; charset=utf-8",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+    except mysql.connector.Error as e:
+        _log_db_error("export_admin_csv", e)
+        return JSONResponse(status_code=500, content={"status": "Failed", "message": "ไม่สามารถส่งออกไฟล์ CSV ได้"})
     finally:
         cursor.close()
         connect.close()

@@ -40,19 +40,29 @@ def _sanitize_text(val: str) -> str:
 
 
 def _validate_thai_phone(val: str) -> str:
-    digits = re.sub(r"[\s\-]", "", val.strip())
+    # แปลง +66 หรือ 66 นำหน้าให้เป็น 0 และตัดขีด/ช่องว่างออกให้เป็นมาตรฐานเดียวกัน
+    digits = re.sub(r"[\s\-\(\)]", "", val.strip())
+    if digits.startswith("+66"):
+        digits = "0" + digits[3:]
+    elif digits.startswith("66") and len(digits) in (10, 11):
+        digits = "0" + digits[2:]
     if not re.match(r"^0[2689]\d{7,8}$", digits):
-        raise ValueError("รูปแบบเบอร์โทรศัพท์ไทยไม่ถูกต้อง (เช่น 0812345678)")
+        raise ValueError("รูปแบบเบอร์โทรศัพท์ไทยไม่ถูกต้อง (เช่น 0808996645)")
     return digits
 
 
 def _validate_license_plate(val: str) -> str:
     cleaned = _sanitize_text(val).upper()
     if len(cleaned) < 2 or len(cleaned) > 20:
-        raise ValueError("กรุณาระบุทะเบียนรถให้ถูกต้อง (ความยาว 2-20 ตัวอักษร)")
+        raise ValueError("กรุณาระบุทะเบียนรถให้ถูกต้อง (เช่น 1กข 1234 หรือ กข 1234)")
     if not re.match(r"^[0-9A-Zก-ฮ\s\-]+$", cleaned):
         raise ValueError("ทะเบียนรถประกอบด้วยตัวอักษรไทย อังกฤษ ตัวเลข หรือขีดเท่านั้น")
-    return cleaned
+    # จัดรูปแบบมาตรฐาน เช่น "1กข1234" หรือ "1กข-1234" -> "1กข 1234"
+    compact = re.sub(r"[\s\-]+", "", cleaned)
+    m = re.match(r"^([0-9]?[ก-ฮA-Z]{1,3})([0-9]{1,4})$", compact)
+    if m:
+        return f"{m.group(1)} {m.group(2)}"
+    return re.sub(r"[\s\-]+", " ", cleaned).strip()
 
 
 class CustomerCreate(BaseModel):
@@ -187,6 +197,9 @@ class BookingCreate(BaseModel):
     ServiceType: AllowedServiceType
     Notes: str | None = Field(default=None, max_length=500)
     Website: str | None = Field(default="", max_length=200)
+    ConsentPDPA: bool = True
+    ConsentVersion: str = Field(default="v1.0", max_length=20)
+    IdempotencyKey: str | None = Field(default=None, max_length=64)
 
     @field_validator("CustomerName")
     @classmethod
@@ -226,6 +239,8 @@ class BookingCreate(BaseModel):
             raise ValueError("ไม่สามารถจองคิวย้อนหลังได้ กรุณาเลือกวันที่ตั้งแต่วันนี้เป็นต้นไป")
         if (parsed - today_bkk).days > 90:
             raise ValueError("สามารถจองคิวล่วงหน้าได้ไม่เกิน 90 วัน")
+        if parsed.weekday() == 6:
+            raise ValueError("อู่ปิดทำการวันอาทิตย์ กรุณาเลือกวันจันทร์–เสาร์")
         return parsed.strftime("%Y-%m-%d")
 
     @field_validator("AppointmentTime")
@@ -246,6 +261,21 @@ class BookingCreate(BaseModel):
         if v is None or not v.strip():
             return None
         return _sanitize_text(v)
+
+    @field_validator("ConsentPDPA")
+    @classmethod
+    def validate_consent(cls, v: bool) -> bool:
+        if not v:
+            raise ValueError("กรุณายินยอมนโยบายคุ้มครองข้อมูลส่วนบุคคล (PDPA) ก่อนทำการจองคิว")
+        return v
+
+    @field_validator("IdempotencyKey")
+    @classmethod
+    def validate_idem_key(cls, v: str | None) -> str | None:
+        if v is None or not v.strip():
+            return None
+        cleaned = re.sub(r"[^a-zA-Z0-9\-_]", "", v.strip())
+        return cleaned[:64] if cleaned else None
 
 
 class AdminLoginRequest(BaseModel):
