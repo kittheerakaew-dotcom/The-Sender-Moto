@@ -1,6 +1,6 @@
 -- The Sender Moto - Database Schema (MySQL / TiDB Cloud Starter compatible)
-CREATE DATABASE IF NOT EXISTS EuroCarcare CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
-USE EuroCarcare;
+CREATE DATABASE IF NOT EXISTS TheSenderMoto CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
+USE TheSenderMoto;
 
 CREATE TABLE IF NOT EXISTS Customers (
     CustomerID INT AUTO_INCREMENT PRIMARY KEY,

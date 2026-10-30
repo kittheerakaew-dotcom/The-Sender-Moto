@@ -47,7 +47,7 @@ def run_backup():
     port = os.getenv("DB_PORT", "3306")
     user = os.getenv("DB_USER", "root")
     password = os.getenv("DB_PASSWORD", "")
-    db_name = os.getenv("DB_NAME", "EuroCarcare")
+    db_name = os.getenv("DB_NAME", "TheSenderMoto")
     ssl_ca = os.getenv("DB_SSL_CA", "")
 
     os.makedirs("backups", exist_ok=True)
@@ -96,7 +96,7 @@ def run_restore(sql_file: str):
     port = os.getenv("DB_PORT", "3306")
     user = os.getenv("DB_USER", "root")
     password = os.getenv("DB_PASSWORD", "")
-    db_name = os.getenv("DB_NAME", "EuroCarcare")
+    db_name = os.getenv("DB_NAME", "TheSenderMoto")
     ssl_ca = os.getenv("DB_SSL_CA", "")
 
     mysql_bin = _find_binary("mysql")
