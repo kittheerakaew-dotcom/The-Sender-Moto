@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from datetime import date, time
 
 class CustomerCreate(BaseModel):
@@ -30,10 +30,10 @@ class ServiceJobCreate(BaseModel):
     TotalCost:          float   =   0.00
 
 class ServiceItemCreate(BaseModel):
-    JobID:              int
+    JobID:              int |   None    =   None
     ItemName:           str
-    Quantity:           int     =   1
-    UnitPrice:          float
+    Quantity:           int     =   Field(default=1, ge=1)
+    UnitPrice:          float   =   Field(ge=0)
 
 class BookingCreate(BaseModel):
     CustomerName: str
@@ -44,8 +44,5 @@ class BookingCreate(BaseModel):
     AppointmentDate: str
     AppointmentTime: str
     ServiceType: str
-
-class ServiceItemCreate(BaseModel):
-    ItemName: str
-    Quantity: int
-    UnitPrice: float
+    Notes: str | None = None
+    Website: str | None = ""
