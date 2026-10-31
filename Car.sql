@@ -11,7 +11,7 @@ CREATE TABLE IF NOT EXISTS Customers (
     Email VARCHAR(100) DEFAULT NULL,
     LineID VARCHAR(50) DEFAULT NULL,
     CustomerTier ENUM('Standard', 'Premium', 'VIP') NOT NULL DEFAULT 'Standard',
-    INDEX idx_customers_phone (PhoneNumber),
+    UNIQUE INDEX idx_customers_phone (PhoneNumber),
     CONSTRAINT chk_customers_phone CHECK (PhoneNumber REGEXP '^0[0-9]{8,9}$')
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 

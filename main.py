@@ -169,31 +169,32 @@ def _hash_client_ip(request: Request | None) -> str:
     return hashlib.sha256(f"sender-moto-rate:{raw_ip}".encode("utf-8")).hexdigest()[:32]
 
 
-def _ensure_phase_b_columns(cursor, connect):
-    """ตรวจสอบและเพิ่มคอลัมน์ใหม่แบบ Idempotent (รองรับทั้ง MySQL 8 และ TiDB)"""
+def _ensure_phase_b_columns(_cursor, connect):
+    """ตรวจสอบและเพิ่มคอลัมน์ใหม่แบบ Idempotent (ใช้ Tuple Cursor แยกต่างหากเพื่อไม่ให้ชนกับ Dictionary Cursor)"""
     global _schema_checked_db
     current_db = getattr(connect, "database", None) or os.getenv("DB_NAME", "")
     if _schema_checked_db == current_db and current_db:
         return
+    ddl_cursor = connect.cursor()
     try:
-        cursor.execute("SHOW COLUMNS FROM Customers")
-        cust_rows = cursor.fetchall()
-        cust_cols = {row[0].lower(): str(row[1]).lower() for row in cust_rows}
+        ddl_cursor.execute("SHOW COLUMNS FROM Customers")
+        cust_rows = ddl_cursor.fetchall()
+        cust_cols = {str(row[0]).lower(): str(row[1]).lower() for row in cust_rows}
         if "lineid" not in cust_cols:
-            cursor.execute("ALTER TABLE Customers ADD COLUMN LineID VARCHAR(50) DEFAULT NULL")
+            ddl_cursor.execute("ALTER TABLE Customers ADD COLUMN LineID VARCHAR(50) DEFAULT NULL")
         if "phonenumber" in cust_cols and "char(10)" not in cust_cols["phonenumber"]:
-            cursor.execute(
+            ddl_cursor.execute(
                 "UPDATE Customers SET PhoneNumber = LEFT(REPLACE(REPLACE(REPLACE(REPLACE(TRIM(PhoneNumber), '-', ''), ' ', ''), '(', ''), ')', ''), 10) WHERE PhoneNumber IS NOT NULL"
             )
-            cursor.execute("ALTER TABLE Customers MODIFY COLUMN PhoneNumber CHAR(10) NOT NULL")
+            ddl_cursor.execute("ALTER TABLE Customers MODIFY COLUMN PhoneNumber CHAR(10) NOT NULL")
 
-        cursor.execute("SHOW COLUMNS FROM Vehicles")
-        veh_cols = {row[0].lower() for row in cursor.fetchall()}
+        ddl_cursor.execute("SHOW COLUMNS FROM Vehicles")
+        veh_cols = {str(row[0]).lower() for row in ddl_cursor.fetchall()}
         if "caryear" not in veh_cols:
-            cursor.execute("ALTER TABLE Vehicles ADD COLUMN CarYear INT DEFAULT NULL")
+            ddl_cursor.execute("ALTER TABLE Vehicles ADD COLUMN CarYear INT DEFAULT NULL")
 
-        cursor.execute("SHOW COLUMNS FROM Appointments")
-        existing_cols = {row[0].lower() for row in cursor.fetchall()}
+        ddl_cursor.execute("SHOW COLUMNS FROM Appointments")
+        existing_cols = {str(row[0]).lower() for row in ddl_cursor.fetchall()}
         alters = [
             ("bookingref", "ALTER TABLE Appointments ADD COLUMN BookingRef VARCHAR(30) DEFAULT NULL"),
             ("estimatedminutes", "ALTER TABLE Appointments ADD COLUMN EstimatedMinutes INT DEFAULT 90"),
@@ -208,17 +209,19 @@ def _ensure_phase_b_columns(cursor, connect):
         ]
         for col_lower, sql in alters:
             if col_lower not in existing_cols:
-                cursor.execute(sql)
+                ddl_cursor.execute(sql)
 
-        cursor.execute("SHOW COLUMNS FROM Service_Jobs")
-        job_cols = {row[0].lower() for row in cursor.fetchall()}
+        ddl_cursor.execute("SHOW COLUMNS FROM Service_Jobs")
+        job_cols = {str(row[0]).lower() for row in ddl_cursor.fetchall()}
         if "internalnotes" not in job_cols:
-            cursor.execute("ALTER TABLE Service_Jobs ADD COLUMN InternalNotes TEXT")
+            ddl_cursor.execute("ALTER TABLE Service_Jobs ADD COLUMN InternalNotes TEXT")
 
         connect.commit()
         _schema_checked_db = current_db
-    except mysql.connector.Error:
+    except Exception:
         pass
+    finally:
+        ddl_cursor.close()
 
 
 def _format_time_hhmm(val) -> str:
@@ -303,12 +306,13 @@ def _send_line_push(booking_ref: str, brand: str, model: str, plate: str, appt_d
         return "Failed"
 
 
-def _check_serverless_rate_limit(cursor, connect, scope: str, ip_hash: str, max_hits: int, window_sec: int) -> bool:
-    """ตรวจสอบและเพิ่มจำนวนครั้งการเรียกในตาราง Rate_Limits (รองรับ Serverless 100%)"""
+def _check_serverless_rate_limit(_cursor, connect, scope: str, ip_hash: str, max_hits: int, window_sec: int) -> bool:
+    """ตรวจสอบและเพิ่มจำนวนครั้งการเรียกในตาราง Rate_Limits (ใช้ Tuple Cursor แยกต่างหากเสมอ)"""
     rate_key = f"{scope}:{ip_hash}"
     now_ts = int(time.time())
+    rl_cursor = connect.cursor()
     try:
-        cursor.execute(
+        rl_cursor.execute(
             """
             CREATE TABLE IF NOT EXISTS Rate_Limits (
                 RateKey VARCHAR(100) PRIMARY KEY,
@@ -317,10 +321,10 @@ def _check_serverless_rate_limit(cursor, connect, scope: str, ip_hash: str, max_
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
             """
         )
-        cursor.execute("SELECT HitCount, WindowStart FROM Rate_Limits WHERE RateKey = %s LIMIT 1", (rate_key,))
-        row = cursor.fetchone()
+        rl_cursor.execute("SELECT HitCount, WindowStart FROM Rate_Limits WHERE RateKey = %s LIMIT 1", (rate_key,))
+        row = rl_cursor.fetchone()
         if not row:
-            cursor.execute(
+            rl_cursor.execute(
                 "INSERT INTO Rate_Limits (RateKey, HitCount, WindowStart) VALUES (%s, 1, %s)",
                 (rate_key, now_ts),
             )
@@ -329,7 +333,7 @@ def _check_serverless_rate_limit(cursor, connect, scope: str, ip_hash: str, max_
 
         hit_count, window_start = int(row[0]), int(row[1])
         if now_ts - window_start >= window_sec:
-            cursor.execute(
+            rl_cursor.execute(
                 "UPDATE Rate_Limits SET HitCount = 1, WindowStart = %s WHERE RateKey = %s",
                 (now_ts, rate_key),
             )
@@ -339,14 +343,25 @@ def _check_serverless_rate_limit(cursor, connect, scope: str, ip_hash: str, max_
         if hit_count >= max_hits:
             return False
 
-        cursor.execute(
+        rl_cursor.execute(
             "UPDATE Rate_Limits SET HitCount = HitCount + 1 WHERE RateKey = %s",
             (rate_key,),
         )
         connect.commit()
         return True
-    except mysql.connector.Error:
+    except Exception:
         return True
+    finally:
+        rl_cursor.close()
+
+
+def _compact_auto_increment(cursor):
+    """รีเซ็ตค่า AUTO_INCREMENT ให้ต่อจากค่าสูงสุดปัจจุบันเสมอ (หรือกลับเป็น 1 เมื่อตารางว่าง)"""
+    for tbl in ("Service_Items", "Service_Jobs", "Appointments", "Vehicles", "Customers"):
+        try:
+            cursor.execute(f"ALTER TABLE {tbl} AUTO_INCREMENT = 1")
+        except Exception:
+            pass
 
 
 def _log_db_error(context: str, err: mysql.connector.Error):
@@ -505,6 +520,32 @@ def admin_logout():
 @app.get("/admin/verify")
 def verify_admin():
     return {"status": "Success", "message": "ยืนยันสิทธิ์ผู้ดูแลระบบสำเร็จ"}
+
+
+@app.post("/admin/system/reset-data")
+def reset_all_system_data():
+    """ล้างข้อมูลทดสอบทั้งหมดในระบบและรีเซ็ตลำดับ ID (AUTO_INCREMENT) ของทุกตารางให้กลับไปเริ่มที่ 1 ใหม่"""
+    connect = get_data_connection()
+    if not connect:
+        return {"status": "Failed", "message": "Database connection error"}
+
+    cursor = connect.cursor()
+    try:
+        cursor.execute("SET FOREIGN_KEY_CHECKS = 0")
+        for tbl in ("Service_Items", "Service_Jobs", "Appointments", "Vehicles", "Customers", "Rate_Limits"):
+            cursor.execute(f"DELETE FROM {tbl}")
+            if tbl != "Rate_Limits":
+                cursor.execute(f"ALTER TABLE {tbl} AUTO_INCREMENT = 1")
+        cursor.execute("SET FOREIGN_KEY_CHECKS = 1")
+        connect.commit()
+        return {"status": "Success", "message": "รีเซ็ตระบบและตั้งค่าลำดับ ID กลับเป็น 1 เรียบร้อยแล้ว"}
+    except mysql.connector.Error as e:
+        connect.rollback()
+        _log_db_error("reset_all_system_data", e)
+        return {"status": "Failed", "message": "ไม่สามารถรีเซ็ตข้อมูลในฐานข้อมูลได้"}
+    finally:
+        cursor.close()
+        connect.close()
 ########################################################################################################
 #   START Customer
 ########################################################################################################
@@ -625,6 +666,7 @@ def delete_customer(customer_id: int = Path(..., gt=0)):
             return {"status": "Failed", "message": "ไม่พบข้อมูลลูกค้ารายนี้"}
 
         cursor.execute("DELETE FROM Customers WHERE CustomerID = %s", (customer_id,))
+        _compact_auto_increment(cursor)
         connect.commit()
         return {"status": "Success", "message": "ลบข้อมูลลูกค้าเรียบร้อยแล้ว"}
     except mysql.connector.Error as e:
@@ -961,7 +1003,7 @@ def create_booking(booking: BookingCreate, request: Request = None):
             connect.rollback()
             return {"status": "Failed", "message": "คิวซ่อมในช่วงเวลาที่เลือกเต็มแล้ว กรุณาเลือกช่วงเวลาอื่น"}
 
-        # 6. ตรวจสอบว่ามีลูกค้าที่ใช้เบอร์โทรศัพท์นี้อยู่แล้วหรือไม่ เพื่อลดข้อมูลซ้ำซ้อน
+        # 6. ตรวจสอบว่ามีลูกค้าที่ใช้เบอร์โทรศัพท์นี้อยู่แล้วหรือไม่ เพื่อป้องกันข้อมูลลูกค้าซ้ำซ้อน (Zero Redundancy)
         cursor.execute(
             "SELECT CustomerID FROM Customers WHERE PhoneNumber = %s LIMIT 1",
             (booking.PhoneNumber,)
@@ -969,11 +1011,16 @@ def create_booking(booking: BookingCreate, request: Request = None):
         existing_customer = cursor.fetchone()
         if existing_customer:
             customer_id = existing_customer[0]
-            if booking.Email or booking.LineID:
-                cursor.execute(
-                    "UPDATE Customers SET Email = COALESCE(%s, Email), LineID = COALESCE(%s, LineID) WHERE CustomerID = %s",
-                    (booking.Email, booking.LineID, customer_id)
-                )
+            cursor.execute(
+                """
+                UPDATE Customers
+                SET CustomerName = %s,
+                    Email = COALESCE(%s, Email),
+                    LineID = COALESCE(%s, LineID)
+                WHERE CustomerID = %s
+                """,
+                (booking.CustomerName, booking.Email, booking.LineID, customer_id)
+            )
         else:
             cursor.execute(
                 "INSERT INTO Customers (CustomerName, PhoneNumber, Email, LineID) VALUES (%s, %s, %s, %s)",
@@ -981,7 +1028,7 @@ def create_booking(booking: BookingCreate, request: Request = None):
             )
             customer_id = cursor.lastrowid
 
-        # 7. ตรวจสอบว่ารถทะเบียนนี้ของลูกค้ารายนี้มีในระบบแล้วหรือไม่
+        # 7. ตรวจสอบว่ารถทะเบียนนี้มีในระบบแล้วหรือไม่ เพื่อป้องกันข้อมูลรถยนต์ซ้ำซ้อน (Zero Vehicle Redundancy)
         cursor.execute(
             "SELECT VehicleID FROM Vehicles WHERE CustomerID = %s AND CarNumber = %s LIMIT 1",
             (customer_id, booking.CarNumber)
@@ -989,8 +1036,10 @@ def create_booking(booking: BookingCreate, request: Request = None):
         existing_vehicle = cursor.fetchone()
         if existing_vehicle:
             vehicle_id = existing_vehicle[0]
-            if booking.CarYear:
-                cursor.execute("UPDATE Vehicles SET CarYear = %s WHERE VehicleID = %s", (booking.CarYear, vehicle_id))
+            cursor.execute(
+                "UPDATE Vehicles SET CarBrand = %s, CarModel = %s, CarYear = COALESCE(%s, CarYear) WHERE VehicleID = %s",
+                (booking.CarBrand, booking.CarModel, booking.CarYear, vehicle_id)
+            )
         else:
             # ใช้ UUID สั้นเพื่อให้ไม่ชนกันแม้มีลูกค้ากดจองพร้อมกันในวินาทีเดียวกัน (ยาว 17 ตัวอักษร)
             temp_vincode = f"TMP-{uuid.uuid4().hex[:13].upper()}"
@@ -1505,6 +1554,7 @@ def delete_appointment(appointment_id: int = Path(..., gt=0)):
             cursor.execute("DELETE FROM Service_Items WHERE JobID = %s", (job_id,))
         cursor.execute("DELETE FROM Service_Jobs WHERE AppointmentID = %s", (appointment_id,))
         cursor.execute("DELETE FROM Appointments WHERE AppointmentID = %s", (appointment_id,))
+        _compact_auto_increment(cursor)
         connect.commit()
         return {"status": "Success", "message": "ลบคิวนัดหมายออกจากระบบเรียบร้อยแล้ว"}
     except mysql.connector.Error as e:
@@ -1624,6 +1674,7 @@ def delete_job(job_id: int = Path(..., gt=0)):
             "UPDATE Appointments SET Status = 'Confirmed' WHERE AppointmentID = %s AND Status IN ('In Progress', 'Ready')",
             (appt_id,)
         )
+        _compact_auto_increment(cursor)
         connect.commit()
         return {"status": "Success", "message": "ลบใบงานซ่อมเรียบร้อยแล้ว"}
     except mysql.connector.Error as e:

@@ -227,7 +227,34 @@ def run_tests():
         del_appt = main.delete_appointment(appointment_id=appt2_id)
         assert del_appt["status"] == "Success", del_appt
 
-        print("ALL PHASE C & ADMIN CRUD TESTS PASSED SUCCESSFULLY!")
+        # 9. ทดสอบลูกค้าคนเดิมจองซ้ำอีกครั้ง (ต้องไม่สร้าง CustomerID หรือ VehicleID ซ้ำซ้อน - Zero Redundancy)
+        cust_count_before = len(main.get_customers()["data"])
+        req_repeat = schemas.BookingCreate(
+            CustomerName="สมชาย ใจดี (อัปเดตชื่อ)",
+            PhoneNumber="081-234-5678",
+            CarBrand="BMW",
+            CarModel="320d M Sport",
+            CarYear=2023,
+            CarNumber="1กข 1234",
+            ServiceType="Suspension",
+            AppointmentDate="2026-11-07",
+            AppointmentTime="10:00",
+            ConsentPDPA=True,
+            Website="",
+        )
+        res_repeat = main.create_booking(req_repeat, make_dummy_request("10.0.0.4"))
+        assert res_repeat["status"] == "Success", res_repeat
+        cust_count_after = len(main.get_customers()["data"])
+        assert cust_count_after == cust_count_before, (
+            f"Redundant customer created! before={cust_count_before}, after={cust_count_after}"
+        )
+
+        # 10. ทดสอบปุ่มรีเซ็ตระบบทั้งหมด (reset_all_system_data)
+        reset_res = main.reset_all_system_data()
+        assert reset_res["status"] == "Success", reset_res
+        assert len(main.get_customers()["data"]) == 0
+
+        print("ALL PHASE C, ZERO-REDUNDANCY & ADMIN CRUD TESTS PASSED SUCCESSFULLY!")
     finally:
         if database._cached_connection:
             try:
