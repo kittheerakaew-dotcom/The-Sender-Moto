@@ -75,7 +75,7 @@ def run_tests():
     root_conn.commit()
 
     try:
-        # 1. จองคิวคันที่ 1 ในช่วงเวลา 2026-11-05 10:00
+        # 1. จองคิวคันที่ 1 ในช่วงเวลา 2026-11-05 08:30 (ทดสอบเวลาชั่วโมงเลขหลักเดียว 08:30)
         req1 = schemas.BookingCreate(
             CustomerName="สมชาย ใจดี",
             PhoneNumber="081-234-5678",
@@ -88,7 +88,7 @@ def run_tests():
             ServiceType="General Maintenance",
             Mileage=45000,
             AppointmentDate="2026-11-05",
-            AppointmentTime="10:00",
+            AppointmentTime="08:30",
             Notes="เช็กระยะตามกำหนด",
             PhotoURL="data:image/jpeg;base64,/9j/4AAQ",
             ConsentPDPA=True,
@@ -100,7 +100,7 @@ def run_tests():
         assert ref1.startswith("SM-261105-"), f"Invalid BookingRef: {ref1}"
         assert res1["estimated_minutes"] == 90
 
-        # 2. จองคิวคันที่ 2 ในช่วงเวลาเดียวกัน (2026-11-05 10:00) -> สำเร็จ (Capacity = 2)
+        # 2. จองคิวคันที่ 2 ในช่วงเวลาเดียวกัน (2026-11-05 08:30) -> สำเร็จ (Capacity = 2)
         req2 = schemas.BookingCreate(
             CustomerName="วิชัย รักรถ",
             PhoneNumber="089-876-5432",
@@ -111,7 +111,7 @@ def run_tests():
             ServiceType="Engine Repair",
             Mileage=12000,
             AppointmentDate="2026-11-05",
-            AppointmentTime="10:00",
+            AppointmentTime="08:30",
             ConsentPDPA=True,
             Website="",
         )
@@ -121,7 +121,7 @@ def run_tests():
         assert ref2.startswith("SM-261105-")
         assert res2["estimated_minutes"] == 240
 
-        # 3. จองคิวคันที่ 3 ในช่วงเวลาเดียวกัน (2026-11-05 10:00) -> ต้องถูกบล็อกเพราะคิวเต็ม
+        # 3. จองคิวคันที่ 3 ในช่วงเวลาเดียวกัน (2026-11-05 08:30) -> ต้องถูกบล็อกเพราะคิวเต็ม
         req3 = schemas.BookingCreate(
             CustomerName="มานะ อดทน",
             PhoneNumber="082-111-2222",
@@ -130,17 +130,17 @@ def run_tests():
             CarNumber="2ขค 5678",
             ServiceType="Diagnostics",
             AppointmentDate="2026-11-05",
-            AppointmentTime="10:00",
+            AppointmentTime="08:30",
             ConsentPDPA=True,
             Website="",
         )
         res3 = main.create_booking(req3, make_dummy_request("10.0.0.3"))
         assert res3["status"] == "Failed" and "เต็มแล้ว" in res3["message"], res3
 
-        # 4. ตรวจสอบจำนวนคิวว่างผ่าน get_slot_availability
+        # 4. ตรวจสอบจำนวนคิวว่างผ่าน get_slot_availability (ต้องได้คีย์ '08:30' ไม่ใช่ '8:30:')
         avail = main.get_slot_availability("2026-11-05")
         assert avail["status"] == "Success"
-        assert avail["booked_slots"].get("10:00") == 2, avail
+        assert avail["booked_slots"].get("08:30") == 2, avail
 
         # 5. ทดสอบลูกค้าค้นหาคิว / เลื่อนนัด / ยกเลิกนัดด้วยตนเอง
         looked = main.lookup_booking(
@@ -148,6 +148,7 @@ def run_tests():
             make_dummy_request("10.0.0.1"),
         )
         assert looked["status"] == "Success" and looked["data"]["BookingRef"] == ref1, looked
+        assert looked["data"]["AppointmentTime"] == "08:30", looked["data"]
 
         resched = main.reschedule_booking(
             schemas.BookingRescheduleRequest(

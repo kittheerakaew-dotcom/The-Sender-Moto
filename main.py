@@ -65,7 +65,7 @@ _SESSION_TTL_SECONDS = 8 * 3600  # อายุเซสชัน 8 ชั่ว
 _BANGKOK_TZ = timezone(timedelta(hours=7))
 _MAX_CARS_PER_SLOT = int(os.getenv("MAX_CARS_PER_SLOT", "2"))
 _MIN_LEAD_MINUTES = int(os.getenv("MIN_LEAD_TIME_MINUTES", "60"))
-_schema_checked = False
+_schema_checked_db: str | None = None
 
 
 def _get_session_secret() -> bytes:
@@ -171,8 +171,9 @@ def _hash_client_ip(request: Request | None) -> str:
 
 def _ensure_phase_b_columns(cursor, connect):
     """ตรวจสอบและเพิ่มคอลัมน์ใหม่แบบ Idempotent (รองรับทั้ง MySQL 8 และ TiDB)"""
-    global _schema_checked
-    if _schema_checked:
+    global _schema_checked_db
+    current_db = getattr(connect, "database", None) or os.getenv("DB_NAME", "")
+    if _schema_checked_db == current_db and current_db:
         return
     try:
         cursor.execute("SHOW COLUMNS FROM Customers")
@@ -209,9 +210,25 @@ def _ensure_phase_b_columns(cursor, connect):
             cursor.execute("ALTER TABLE Service_Jobs ADD COLUMN InternalNotes TEXT")
 
         connect.commit()
-        _schema_checked = True
+        _schema_checked_db = current_db
     except mysql.connector.Error:
         pass
+
+
+def _format_time_hhmm(val) -> str:
+    """แปลงค่า TIME จาก MySQL (timedelta หรือ string เช่น '8:30:00') ให้เป็น '08:30' (HH:MM) เสมอ"""
+    if val is None:
+        return ""
+    if isinstance(val, timedelta):
+        total_seconds = int(val.total_seconds())
+        hours = (total_seconds // 3600) % 24
+        minutes = (total_seconds % 3600) // 60
+        return f"{hours:02d}:{minutes:02d}"
+    s = str(val).strip()
+    parts = s.split(":")
+    if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
+        return f"{int(parts[0]):02d}:{int(parts[1]):02d}"
+    return s[:5]
 
 
 def _utc_to_bangkok_str(dt_val) -> str | None:
@@ -624,7 +641,7 @@ def get_appointment():
 
         for row in result:
             if 'AppointmentTime' in row and row['AppointmentTime'] is not None:
-                row['AppointmentTime'] = str(row['AppointmentTime'])
+                row['AppointmentTime'] = _format_time_hhmm(row['AppointmentTime'])
             if 'AppointmentDate' in row and row['AppointmentDate'] is not None:
                 row['AppointmentDate'] = str(row['AppointmentDate'])
 
@@ -708,7 +725,21 @@ def create_service_item(item: ServiceItemCreate):
     val = (item.JobID, item.ItemName, item.Quantity, item.UnitPrice)
 
     try:
+        cursor.execute(
+            "SELECT JobStatus FROM Service_Jobs WHERE JobID = %s LIMIT 1",
+            (item.JobID,)
+        )
+        job_row = cursor.fetchone()
+        if not job_row:
+            return {"status": "Failed", "message": "ไม่พบใบงานซ่อมนี้"}
+        if job_row[0] in ("Completed", "Cancelled"):
+            return {"status": "Failed", "message": "ใบงานซ่อมนี้ปิดหรือยกเลิกแล้ว ไม่สามารถเพิ่มรายการได้"}
+
         cursor.execute(sql, val)
+        cursor.execute(
+            "UPDATE Service_Jobs SET TotalCost = COALESCE(TotalCost, 0) + %s WHERE JobID = %s",
+            (item.Quantity * item.UnitPrice, item.JobID)
+        )
         connect.commit()
         msg = "Success"
         detail = "เพิ่มรายการอะไหล่สำเร็จ"
@@ -768,9 +799,7 @@ def get_slot_availability(date: str = Query(..., min_length=10, max_length=10)):
         )
         counts = {}
         for row in cursor.fetchall():
-            t_str = str(row["AppointmentTime"])[:5]
-            if len(t_str) == 4:
-                t_str = "0" + t_str
+            t_str = _format_time_hhmm(row["AppointmentTime"])
             counts[t_str] = int(row["BookedCount"])
 
         return {
@@ -999,7 +1028,7 @@ def lookup_booking(req: BookingLookupRequest, request: Request = None):
             return {"status": "Failed", "message": "ไม่พบข้อมูลการจองคิว กรุณาตรวจสอบรหัสการจองและเบอร์โทรศัพท์"}
 
         appt["AppointmentDate"] = str(appt["AppointmentDate"])
-        appt["AppointmentTime"] = str(appt["AppointmentTime"])[:5]
+        appt["AppointmentTime"] = _format_time_hhmm(appt["AppointmentTime"])
         appt["BookingRef"] = appt.get("BookingRef") or f"BK-{appt['AppointmentID']}"
         return {"status": "Success", "data": appt}
     except mysql.connector.Error as e:
@@ -1031,7 +1060,7 @@ def reschedule_booking(req: BookingRescheduleRequest, request: Request = None):
         cond_sql, ref_val = _parse_booking_ref_condition(req.BookingRef)
         cursor.execute(
             f"""
-            SELECT a.AppointmentID, a.Status
+            SELECT a.AppointmentID, a.Status, a.VehicleID
             FROM Appointments a
             JOIN Customers c ON a.CustomerID = c.CustomerID
             WHERE {cond_sql} AND c.PhoneNumber = %s
@@ -1043,9 +1072,24 @@ def reschedule_booking(req: BookingRescheduleRequest, request: Request = None):
         if not row:
             return {"status": "Failed", "message": "ไม่พบข้อมูลการจองคิว กรุณาตรวจสอบรหัสการจองและเบอร์โทรศัพท์"}
 
-        appt_id, current_status = row[0], row[1]
+        appt_id, current_status, vehicle_id = row[0], row[1], row[2]
         if current_status not in ("Pending", "Confirmed"):
             return {"status": "Failed", "message": f"ไม่สามารถเลื่อนนัดหมายได้ เนื่องจากสถานะปัจจุบันคือ {current_status}"}
+
+        # ป้องกันการเลื่อนไปชนกับคิวนัดหมายอื่นของรถคันเดียวกันในวันที่เลือก
+        cursor.execute(
+            """
+            SELECT AppointmentID FROM Appointments
+            WHERE VehicleID = %s AND AppointmentDate = %s
+              AND AppointmentID != %s
+              AND Status IN ('Pending', 'Confirmed', 'In Progress', 'Ready')
+            LIMIT 1
+            """,
+            (vehicle_id, req.AppointmentDate, appt_id)
+        )
+        if cursor.fetchone():
+            connect.rollback()
+            return {"status": "Failed", "message": "รถทะเบียนนี้มีคิวนัดหมายอื่นในวันที่เลือกไว้แล้ว"}
 
         slot_time_sql = f"{req.AppointmentTime}:00"
         cursor.execute(
@@ -1155,7 +1199,7 @@ def retry_failed_notifications():
                 r["CarModel"],
                 r["CarNumber"],
                 str(r["AppointmentDate"]),
-                str(r["AppointmentTime"])[:5],
+                _format_time_hhmm(r["AppointmentTime"]),
                 r["ServiceType"],
             )
             cursor.execute(
@@ -1202,7 +1246,7 @@ def get_appointments():
 
         for appt in appointments:
             appt['AppointmentDate'] = str(appt['AppointmentDate'])
-            appt['AppointmentTime'] = str(appt['AppointmentTime'])
+            appt['AppointmentTime'] = _format_time_hhmm(appt['AppointmentTime'])
             appt['BookingRef'] = appt.get('BookingRef') or f"BK-{appt['AppointmentID']}"
             appt['CreatedAtBangkok'] = _utc_to_bangkok_str(appt.get('CreatedAtUTC'))
             appt['ConsentAtBangkok'] = _utc_to_bangkok_str(appt.get('ConsentAtUTC'))
@@ -1288,19 +1332,28 @@ def update_appointment_status(req: StatusUpdateRequest, appointment_id: int = Pa
                 "UPDATE Appointments SET Status = %s, InternalNotes = %s WHERE AppointmentID = %s",
                 (req.Status, req.InternalNotes, appointment_id)
             )
+            cursor.execute(
+                "UPDATE Service_Jobs SET InternalNotes = %s WHERE AppointmentID = %s",
+                (req.InternalNotes, appointment_id)
+            )
         else:
             cursor.execute(
                 "UPDATE Appointments SET Status = %s WHERE AppointmentID = %s",
                 (req.Status, appointment_id)
             )
 
-        # หากเปลี่ยนเป็น In Progress และยังไม่มีใบงานใน Service_Jobs ให้สร้างใบงานอัตโนมัติ
+        # หากเปลี่ยนเป็น In Progress และยังไม่มีใบงานใน Service_Jobs ให้สร้างใบงานอัตโนมัติ หรือซิงก์สถานะ
         if req.Status == "In Progress":
             cursor.execute("SELECT JobID FROM Service_Jobs WHERE AppointmentID = %s LIMIT 1", (appointment_id,))
             if not cursor.fetchone():
                 cursor.execute(
-                    "INSERT INTO Service_Jobs (AppointmentID, MechanicName, JobStatus) VALUES (%s, %s, 'In Progress')",
-                    (appointment_id, 'ช่างประจำศูนย์')
+                    "INSERT INTO Service_Jobs (AppointmentID, MechanicName, JobStatus, InternalNotes) VALUES (%s, %s, 'In Progress', %s)",
+                    (appointment_id, 'ช่างประจำศูนย์', req.InternalNotes)
+                )
+            else:
+                cursor.execute(
+                    "UPDATE Service_Jobs SET JobStatus = 'In Progress' WHERE AppointmentID = %s",
+                    (appointment_id,)
                 )
         elif req.Status in ("Ready", "Completed", "Cancelled"):
             cursor.execute(
@@ -1376,16 +1429,19 @@ def update_job_status(req: StatusUpdateRequest, job_id: int = Path(..., gt=0)):
                 "UPDATE Service_Jobs SET JobStatus = %s, InternalNotes = %s WHERE JobID = %s",
                 (req.Status, req.InternalNotes, job_id)
             )
+            cursor.execute(
+                "UPDATE Appointments SET Status = %s, InternalNotes = %s WHERE AppointmentID = %s",
+                (req.Status, req.InternalNotes, appt_id)
+            )
         else:
             cursor.execute(
                 "UPDATE Service_Jobs SET JobStatus = %s WHERE JobID = %s",
                 (req.Status, job_id)
             )
-
-        cursor.execute(
-            "UPDATE Appointments SET Status = %s WHERE AppointmentID = %s",
-            (req.Status, appt_id)
-        )
+            cursor.execute(
+                "UPDATE Appointments SET Status = %s WHERE AppointmentID = %s",
+                (req.Status, appt_id)
+            )
         connect.commit()
         return {"status": "Success", "message": "อัปเดตสถานะใบงานซ่อมเรียบร้อยแล้ว"}
     except mysql.connector.Error as e:
@@ -1412,15 +1468,15 @@ def add_job_item(item: ServiceItemCreate, job_id: int = Path(..., gt=0)):
         job_row = cursor.fetchone()
         if not job_row:
             return {"status": "Failed", "message": "ไม่พบใบงานซ่อมนี้"}
-        if job_row[0] == "Completed":
-            return {"status": "Failed", "message": "ใบงานซ่อมนี้ปิดงานแล้ว ไม่สามารถเพิ่มรายการได้"}
+        if job_row[0] in ("Completed", "Cancelled"):
+            return {"status": "Failed", "message": "ใบงานซ่อมนี้ปิดหรือยกเลิกแล้ว ไม่สามารถเพิ่มรายการได้"}
 
         cursor.execute(
             "INSERT INTO Service_Items (JobID, ItemName, Quantity, UnitPrice) VALUES (%s, %s, %s, %s)",
             (job_id, item.ItemName, item.Quantity, item.UnitPrice)
         )
         cursor.execute(
-            "UPDATE Service_Jobs SET TotalCost = TotalCost + %s WHERE JobID = %s",
+            "UPDATE Service_Jobs SET TotalCost = COALESCE(TotalCost, 0) + %s WHERE JobID = %s",
             (item.Quantity * item.UnitPrice, job_id)
         )
 
@@ -1487,12 +1543,14 @@ def complete_job(job_id: int = Path(..., gt=0)):
     try:
         # อัปเดตสถานะใบงานเป็น Completed และซิงก์สถานะนัดหมายให้เป็น Completed ด้วย
         cursor.execute(
-            "SELECT AppointmentID FROM Service_Jobs WHERE JobID = %s LIMIT 1",
+            "SELECT AppointmentID, JobStatus FROM Service_Jobs WHERE JobID = %s LIMIT 1",
             (job_id,)
         )
         row = cursor.fetchone()
         if not row:
             return {"status": "Failed", "message": "ไม่พบใบงานซ่อมนี้"}
+        if row[1] == "Cancelled":
+            return {"status": "Failed", "message": "ใบงานที่ยกเลิกแล้วไม่สามารถปิดงานซ่อมได้"}
 
         cursor.execute(
             "UPDATE Service_Jobs SET JobStatus = 'Completed' WHERE JobID = %s",
@@ -1567,7 +1625,7 @@ def export_admin_csv(resource: str):
                     _safe_csv_cell(r.get("AppointmentID")),
                     _safe_csv_cell(r.get("BookingRef") or f"BK-{r.get('AppointmentID')}"),
                     _safe_csv_cell(r.get("AppointmentDate")),
-                    _safe_csv_cell(r.get("AppointmentTime")),
+                    _safe_csv_cell(_format_time_hhmm(r.get("AppointmentTime"))),
                     _safe_csv_cell(r.get("CustomerName")),
                     _safe_csv_cell(r.get("PhoneNumber")),
                     _safe_csv_cell(r.get("CarBrand")),

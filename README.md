@@ -102,17 +102,17 @@ $env:PYTHONIOENCODING="utf-8"; .\venv\Scripts\python.exe scripts\test_booking_fl
 
 ## 5. การสำรองและกู้คืนฐานข้อมูล (Backup & Restore)
 
-ไม่ควรพึ่งพาเฉพาะระบบสำรองข้อมูลอัตโนมัติของ Cloud เพียงอย่างเดียว แนะนำให้สำรองข้อมูลเก็บไว้ในเครื่องอย่างน้อยสัปดาห์ละ 1 ครั้งด้วยสคริปต์ `scripts/backup_restore_db.ps1` หรือปุ่ม **ส่งออก CSV** ในหน้า Admin
+ไม่ควรพึ่งพาเฉพาะระบบสำรองข้อมูลอัตโนมัติของ Cloud เพียงอย่างเดียว แนะนำให้สำรองข้อมูลเก็บไว้ในเครื่องอย่างน้อยสัปดาห์ละ 1 ครั้งด้วยสคริปต์ `backup_restore.py` หรือปุ่ม **ส่งออก CSV** ในหน้า Admin
 
 ### สำรองข้อมูล (Backup เป็นไฟล์ `.sql`)
 ```powershell
-.\scripts\backup_restore_db.ps1 -Mode backup
+.\venv\Scripts\python.exe backup_restore.py backup
 ```
-ไฟล์สำรองจะถูกบันทึกไว้ที่โฟลเดอร์ `backups/TheSenderMoto_backup_YYYYMMDD_HHMMSS.sql`
+ไฟล์สำรองจะถูกบันทึกไว้ที่โฟลเดอร์ `backups/the_sender_moto_YYYYMMDD_HHMMSS.sql`
 
 ### กู้คืนข้อมูล (Restore จากไฟล์ `.sql`)
 ```powershell
-.\scripts\backup_restore_db.ps1 -Mode restore -SqlFile .\backups\TheSenderMoto_backup_20261031_120000.sql
+.\venv\Scripts\python.exe backup_restore.py restore backups\the_sender_moto_20261031_120000.sql
 ```
 
 ---
