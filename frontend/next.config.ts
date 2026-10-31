@@ -1,12 +1,6 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  /* config options here */
-  experimental: {
-    agentFeedback: true,
-  },
-  cacheComponents: true,
-  partialPrefetching: true,
   turbopack: {
     rules: {
       "*.css": {
@@ -16,6 +10,9 @@ const nextConfig: NextConfig = {
     },
   },
   async rewrites() {
+    if (process.env.VERCEL) {
+      return [];
+    }
     const backendUrl = process.env.BACKEND_INTERNAL_URL || "http://127.0.0.1:8000";
     return [
       {
