@@ -771,10 +771,6 @@ export default function LandingPage() {
             >
               ค้นหาสถานะคิวซ่อมด้วยรหัส SM-...
             </button>
-            <span className="text-slate-700">|</span>
-            <Link href="/admin" className="text-slate-400 hover:text-blue-400 transition-colors">
-              สำหรับเจ้าหน้าที่ (Admin)
-            </Link>
           </div>
         </div>
       </div>
@@ -867,13 +863,6 @@ export default function LandingPage() {
                 >
                   ค้นหาสถานะ / เลื่อนนัด (SM-...)
                 </button>
-                <Link
-                  href="/admin"
-                  onClick={() => setIsMobileNavOpen(false)}
-                  className="min-h-10 px-4 py-2 rounded-xl border border-slate-800 bg-slate-950 text-slate-400 hover:text-blue-400 text-xs flex items-center justify-center"
-                >
-                  สำหรับเจ้าหน้าที่ (Admin)
-                </Link>
               </div>
               <div className="flex items-center justify-between sm:justify-end gap-3 text-xs text-slate-400 px-1">
                 <span>จันทร์–เสาร์ 08:30 – 17:30 น.</span>
@@ -1571,11 +1560,6 @@ export default function LandingPage() {
               <li>
                 <Link href="/privacy" className="hover:text-blue-400 transition-colors">
                   นโยบายคุ้มครองข้อมูลส่วนบุคคล (PDPA)
-                </Link>
-              </li>
-              <li>
-                <Link href="/admin" className="text-slate-500 hover:text-blue-400 transition-colors">
-                  สำหรับเจ้าหน้าที่ (Admin Dashboard) &rarr;
                 </Link>
               </li>
             </ul>

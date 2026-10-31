@@ -10,7 +10,8 @@ const API_URL = process.env.NEXT_PUBLIC_API_URL || "/api";
 export default function AdminLayout({ children }: { children: React.ReactNode }) {
   const pathname = usePathname(); // ใช้สำหรับเช็กว่าตอนนี้อยู่หน้าไหน เพื่อทำแถบสีไฮไลต์เมนู
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
-  const [isAuthRequired, setIsAuthRequired] = useState(false);
+  const [isAuthenticated, setIsAuthenticated] = useState(false);
+  const [isCheckingAuth, setIsCheckingAuth] = useState(true);
   const [adminKeyInput, setAdminKeyInput] = useState("");
   const [authError, setAuthError] = useState("");
   const [isLoggingIn, setIsLoggingIn] = useState(false);
@@ -18,20 +19,48 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
 
   useEffect(() => {
     axios.defaults.withCredentials = true;
-    const savedKey = window.sessionStorage.getItem("sender_moto_admin_key");
-    if (savedKey) {
-      axios.defaults.headers.common["X-Admin-Key"] = savedKey;
-    }
 
     const interceptorId = axios.interceptors.response.use(
       (res) => res,
       (err) => {
         if (err?.response?.status === 401) {
-          setIsAuthRequired(true);
+          window.sessionStorage.removeItem("sender_moto_admin_key");
+          delete axios.defaults.headers.common["X-Admin-Key"];
+          setIsAuthenticated(false);
         }
         return Promise.reject(err);
       }
     );
+
+    const checkExistingSession = async () => {
+      const savedKey = window.sessionStorage.getItem("sender_moto_admin_key");
+      if (!savedKey) {
+        await Promise.resolve();
+        setIsAuthenticated(false);
+        setIsCheckingAuth(false);
+        return;
+      }
+
+      axios.defaults.headers.common["X-Admin-Key"] = savedKey;
+      try {
+        const res = await axios.get(`${API_URL}/admin/verify`, { withCredentials: true });
+        if (res.data?.status === "Success") {
+          setIsAuthenticated(true);
+        } else {
+          window.sessionStorage.removeItem("sender_moto_admin_key");
+          delete axios.defaults.headers.common["X-Admin-Key"];
+          setIsAuthenticated(false);
+        }
+      } catch {
+        window.sessionStorage.removeItem("sender_moto_admin_key");
+        delete axios.defaults.headers.common["X-Admin-Key"];
+        setIsAuthenticated(false);
+      } finally {
+        setIsCheckingAuth(false);
+      }
+    };
+
+    void checkExistingSession();
 
     return () => {
       axios.interceptors.response.eject(interceptorId);
@@ -59,8 +88,7 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
         window.sessionStorage.setItem("sender_moto_admin_key", sessionToken);
         axios.defaults.headers.common["X-Admin-Key"] = sessionToken;
         setAdminKeyInput("");
-        setIsAuthRequired(false);
-        window.location.reload();
+        setIsAuthenticated(true);
       } else {
         setAuthError(res.data?.message || "รหัสผ่านไม่ถูกต้อง");
       }
@@ -83,7 +111,7 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
     }
     window.sessionStorage.removeItem("sender_moto_admin_key");
     delete axios.defaults.headers.common["X-Admin-Key"];
-    setIsAuthRequired(true);
+    setIsAuthenticated(false);
   };
 
   const handleRefreshAll = () => {
@@ -122,6 +150,74 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
     { name: "คิวซ่อม (Appointments)", path: "/admin/appointments" },
     { name: "ใบงานซ่อม (Service Jobs)", path: "/admin/jobs" },
   ];
+
+  if (isCheckingAuth) {
+    return (
+      <div className="min-h-dvh bg-[#0b0f17] flex items-center justify-center p-4 font-sans text-slate-300">
+        <div className="text-center space-y-3">
+          <div className="w-12 h-12 mx-auto rounded-2xl bg-blue-600 flex items-center justify-center font-extrabold text-white text-lg shadow-lg">
+            SM
+          </div>
+          <p className="text-sm text-slate-400">กำลังตรวจสอบสิทธิ์ผู้ดูแลระบบ...</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (!isAuthenticated) {
+    return (
+      <div className="min-h-dvh bg-[radial-gradient(ellipse_at_top,#1e293b_0%,#0b0f17_70%)] flex items-center justify-center p-4 font-sans">
+        <div className="bg-slate-900 border border-slate-800 rounded-2xl shadow-2xl w-full max-w-md overflow-hidden">
+          <div className="bg-[#0b0f17] border-b border-slate-800 p-6 text-center">
+            <div className="w-12 h-12 mx-auto mb-3 rounded-xl bg-linear-to-br from-blue-500 to-blue-700 flex items-center justify-center font-extrabold text-white text-base shadow-[0_0_24px_rgba(37,99,235,0.45)]">
+              SM
+            </div>
+            <h1 className="text-xl font-extrabold text-white tracking-wide">
+              THE SENDER <span className="text-blue-400">MOTO</span>
+            </h1>
+            <p className="text-xs text-slate-400 mt-1">
+              ระบบจัดการอู่สำหรับเจ้าหน้าที่ (Admin Portal) &bull; กรุณากรอกรหัสผ่านก่อนเข้าใช้งาน
+            </p>
+          </div>
+          <form onSubmit={handleUnlockAdmin} className="p-6 space-y-4">
+            {authError && (
+              <div className="text-xs text-red-200 bg-red-950/70 border border-red-800 p-3 rounded-xl">
+                {authError}
+              </div>
+            )}
+            <div>
+              <label htmlFor="admin-key-input" className="block text-xs font-semibold text-slate-300 mb-1.5">
+                รหัสผ่านผู้ดูแลระบบ (Admin Password) *
+              </label>
+              <input
+                id="admin-key-input"
+                type="password"
+                required
+                autoFocus
+                autoComplete="current-password"
+                value={adminKeyInput}
+                onChange={(e) => setAdminKeyInput(e.target.value)}
+                placeholder="กรอกรหัสผ่านผู้ดูแลระบบ"
+                className="w-full bg-slate-800 border border-slate-700 rounded-xl px-4 py-3 text-white text-sm focus:outline-none focus:border-blue-500"
+              />
+            </div>
+            <button
+              type="submit"
+              disabled={isLoggingIn}
+              className="w-full py-3 bg-blue-600 hover:bg-blue-500 disabled:opacity-60 text-white font-bold rounded-xl text-sm transition-colors shadow-[0_0_20px_rgba(37,99,235,0.4)] cursor-pointer"
+            >
+              {isLoggingIn ? "กำลังตรวจสอบรหัสผ่าน..." : "เข้าสู่ระบบจัดการอู่"}
+            </button>
+            <div className="pt-2 text-center">
+              <Link href="/" className="text-xs text-slate-400 hover:text-blue-400 transition-colors">
+                &larr; กลับสู่หน้าเว็บไซต์หลัก
+              </Link>
+            </div>
+          </form>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="flex flex-col md:flex-row min-h-dvh md:h-dvh bg-slate-100 font-sans md:overflow-hidden">
@@ -218,48 +314,6 @@ export default function AdminLayout({ children }: { children: React.ReactNode })
       <main className="flex-1 overflow-y-auto">
         {children}
       </main>
-
-      {/* หน้าต่างยืนยันสิทธิ์เมื่อตั้งค่า ADMIN_PASSWORD_HASH / ADMIN_API_KEY ในระบบ */}
-      {isAuthRequired && (
-        <div className="fixed inset-0 bg-black/75 flex items-center justify-center p-4 z-50 print:hidden">
-          <div className="bg-white rounded-xl shadow-2xl w-full max-w-sm overflow-hidden">
-            <div className="bg-slate-900 text-white p-4">
-              <h3 className="text-lg font-bold text-blue-400">ยืนยันสิทธิ์ผู้ดูแลระบบ</h3>
-              <p className="text-xs text-slate-300 mt-1">
-                กรุณากรอกรหัสผ่านผู้ดูแลระบบเพื่อเข้าใช้งานระบบจัดการอู่ The Sender Moto ครับ
-              </p>
-            </div>
-            <form onSubmit={handleUnlockAdmin} className="p-6 space-y-4">
-              {authError && (
-                <p className="text-xs text-red-600 bg-red-50 p-2 rounded">{authError}</p>
-              )}
-              <div>
-                <label htmlFor="admin-key-input" className="block text-sm font-medium text-gray-700 mb-1">
-                  รหัสผ่านผู้ดูแลระบบ (Admin Password) *
-                </label>
-                <input
-                  id="admin-key-input"
-                  type="password"
-                  required
-                  autoComplete="current-password"
-                  value={adminKeyInput}
-                  onChange={(e) => setAdminKeyInput(e.target.value)}
-                  placeholder="กรอกรหัสผ่านผู้ดูแลระบบ"
-                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-gray-900 focus:outline-none focus:border-slate-600"
-                />
-              </div>
-              <button
-                type="submit"
-                disabled={isLoggingIn}
-                className="w-full py-2.5 bg-slate-900 hover:bg-slate-800 disabled:opacity-60 text-white font-semibold rounded-lg transition-colors"
-              >
-                {isLoggingIn ? "กำลังตรวจสอบ..." : "เข้าสู่ระบบ"}
-              </button>
-            </form>
-          </div>
-        </div>
-      )}
-      
     </div>
   );
 }

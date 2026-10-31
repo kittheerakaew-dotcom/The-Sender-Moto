@@ -103,37 +103,44 @@ def _verify_session_token(token: str) -> bool:
 def _verify_password(plain_password: str) -> bool:
     pwd_hash = os.getenv("ADMIN_PASSWORD_HASH", "").strip()
     admin_key = os.getenv("ADMIN_API_KEY", "").strip()
+    admin_pwd = os.getenv("ADMIN_PASSWORD", "").strip()
 
-    # 1. ตรวจสอบกับรหัสผ่านที่เข้ารหัสแบบ scrypt (scrypt$N$r$p$salt$hash)
-    if pwd_hash.startswith("scrypt$"):
-        try:
-            _, n_s, r_s, p_s, salt_hex, digest_hex = pwd_hash.split("$")
-            derived = hashlib.scrypt(
-                plain_password.encode("utf-8"),
-                salt=bytes.fromhex(salt_hex),
-                n=int(n_s),
-                r=int(r_s),
-                p=int(p_s),
-                dklen=len(bytes.fromhex(digest_hex)),
-            )
-            if hmac.compare_digest(derived.hex(), digest_hex):
-                return True
-        except Exception:
-            return False
+    # 1. ตรวจสอบกับรหัสผ่านที่เข้ารหัสแบบ scrypt (scrypt$N$r$p$salt$hash) หรือข้อความปกติ
+    if pwd_hash:
+        if pwd_hash.startswith("scrypt$"):
+            try:
+                _, n_s, r_s, p_s, salt_hex, digest_hex = pwd_hash.split("$")
+                derived = hashlib.scrypt(
+                    plain_password.encode("utf-8"),
+                    salt=bytes.fromhex(salt_hex),
+                    n=int(n_s),
+                    r=int(r_s),
+                    p=int(p_s),
+                    dklen=len(bytes.fromhex(digest_hex)),
+                )
+                if hmac.compare_digest(derived.hex(), digest_hex):
+                    return True
+            except Exception:
+                return False
+        elif hmac.compare_digest(plain_password, pwd_hash):
+            return True
 
-    # 2. รองรับ ADMIN_API_KEY สำหรับความเข้ากันได้ย้อนหลัง
+    # 2. รองรับ ADMIN_API_KEY และ ADMIN_PASSWORD
     if admin_key and hmac.compare_digest(plain_password, admin_key):
         return True
+    if admin_pwd and hmac.compare_digest(plain_password, admin_pwd):
+        return True
+
+    # 3. กรณีไม่ได้ตั้งค่าตัวแปรสภาพแวดล้อมใดๆ เลย ให้ใช้รหัสผ่านมาตรฐานของระบบเพื่อไม่ให้เข้าหน้า Admin แบบไร้รหัสผ่านได้
+    if not pwd_hash and not admin_key and not admin_pwd:
+        return plain_password in ("SenderMotoAdmin2026", "admin123")
 
     return False
 
 
 def _is_admin_auth_configured() -> bool:
-    return bool(
-        os.getenv("ADMIN_PASSWORD_HASH", "").strip()
-        or os.getenv("ADMIN_API_KEY", "").strip()
-        or _IS_PROD
-    )
+    # บังคับให้ต้องยืนยันรหัสผ่านเสมอทุกครั้งก่อนเข้าใช้งาน API ของผู้ดูแลระบบ
+    return True
 
 
 def _is_request_authorized(request: Request) -> bool:
