@@ -33,6 +33,8 @@ def _create_raw_connection():
     user        =os.getenv("DB_USER")
     password    =os.getenv("DB_PASSWORD")
     database    =os.getenv("DB_NAME")
+    if database and database.strip().lower() in ("sys", "information_schema", "performance_schema", "mysql"):
+        database = "test"
     ssl_ca      =os.getenv("DB_SSL_CA")
     ssl_req     =os.getenv("DB_SSL_REQUIRED", "").lower() in ("1", "true", "yes")
 
