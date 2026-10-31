@@ -46,7 +46,8 @@
 
 html {
   scroll-behavior: smooth;
-  overflow-x: hidden;
+  color-scheme: dark;
+  overflow-x: clip;
 }
 
 body {
@@ -55,7 +56,27 @@ body {
   font-family: var(--font-noto-thai), var(--font-plus-jakarta), Arial, Helvetica, sans-serif;
   line-height: 1.75;
   letter-spacing: 0;
-  overflow-x: hidden;
+  overflow-x: clip;
+}
+
+/* ปรับแต่งแถบเลื่อน (Scrollbar) ให้เป็นโทนมืดกลมกลืนกับธีมเว็บหรู ไม่เป็นแถบสีขาวสว่างด้านขวา */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: #0b0f17;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #1e293b;
+  border-radius: 9999px;
+  border: 2px solid #0b0f17;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #3b82f6;
 }
 
 h1, h2, h3, h4 {

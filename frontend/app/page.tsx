@@ -736,7 +736,7 @@ export default function LandingPage() {
   ];
 
   return (
-    <div id="home" className="min-h-screen bg-[#0b0f17] text-slate-50 font-sans selection:bg-blue-600 selection:text-white overflow-x-hidden">
+    <div id="home" className="min-h-screen bg-[#0b0f17] text-slate-50 font-sans selection:bg-blue-600 selection:text-white overflow-x-clip">
       {/* ลิงก์ข้ามไปยังเนื้อหาหลักสำหรับผู้ใช้คีย์บอร์ดและ Screen Reader (WCAG 2.2 AA) */}
       <a
         href="#main-content"
