@@ -47,16 +47,39 @@ def _create_raw_connection():
         "use_unicode":          True,
     }
 
-    # เปิดใช้ TLS อัตโนมัติเมื่อต่อกับ TiDB Cloud หรือเมื่อกำหนดค่า SSL ใน .env
-    if ssl_ca:
-        connect_kwargs["ssl_ca"] = ssl_ca
+    # เปิดใช้ TLS อัตโนมัติเมื่อต่อกับ Cloud Database (เช่น TiDB Cloud) หรือเมื่อกำหนดค่า SSL ใน .env
+    ssl_ca_clean = (ssl_ca or "").strip()
+    ssl_ca_is_bool = ssl_ca_clean.lower() in ("1", "true", "yes", "0", "false", "no")
+    is_remote_host = bool(host and host.strip().lower() not in ("127.0.0.1", "localhost"))
+
+    if ssl_ca_clean and not ssl_ca_is_bool and os.path.isfile(ssl_ca_clean):
+        connect_kwargs["ssl_ca"] = ssl_ca_clean
         connect_kwargs["ssl_verify_identity"] = True
-    elif ssl_req or (host and "tidbcloud.com" in host):
+    elif (
+        ssl_req
+        or ssl_ca_clean.lower() in ("1", "true", "yes")
+        or (host and "tidbcloud.com" in host.lower())
+        or is_remote_host
+    ):
         connect_kwargs["ssl_disabled"] = False
     else:
         connect_kwargs["ssl_disabled"] = True
 
-    return mysql.connector.connect(**connect_kwargs)
+    try:
+        return mysql.connector.connect(**connect_kwargs)
+    except Error as err:
+        # กรณีฐานข้อมูล (DB_NAME) ยังไม่ถูกสร้างบน Cloud ให้สร้างฐานข้อมูลให้อัตโนมัติ
+        if getattr(err, "errno", None) == 1049 and database:
+            temp_kwargs = dict(connect_kwargs)
+            temp_kwargs.pop("database", None)
+            conn = mysql.connector.connect(**temp_kwargs)
+            cur = conn.cursor()
+            safe_db = database.replace("`", "")
+            cur.execute(f"CREATE DATABASE IF NOT EXISTS `{safe_db}` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci")
+            cur.close()
+            conn.database = database
+            return conn
+        raise
 
 
 def get_data_connection():
