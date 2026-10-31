@@ -61,8 +61,8 @@ def _validate_thai_phone(val: str) -> str:
 
 def _validate_license_plate(val: str) -> str:
     cleaned = _sanitize_text(val).upper()
-    if len(cleaned) < 2 or len(cleaned) > 20:
-        raise ValueError("กรุณาระบุทะเบียนรถให้ถูกต้อง (เช่น 1กข 1234 หรือ กข 1234)")
+    if len(cleaned) < 2 or len(cleaned) > 15:
+        raise ValueError("กรุณาระบุทะเบียนรถให้ถูกต้อง ความยาวไม่เกิน 15 ตัวอักษร (เช่น 1กข 1234)")
     if not re.match(r"^[0-9A-Zก-ฮ\s\-]+$", cleaned):
         raise ValueError("ทะเบียนรถประกอบด้วยตัวอักษรไทย อังกฤษ ตัวเลข หรือขีดเท่านั้น")
     # จัดรูปแบบมาตรฐาน เช่น "1กข1234" หรือ "1กข-1234" -> "1กข 1234"
@@ -70,7 +70,7 @@ def _validate_license_plate(val: str) -> str:
     m = re.match(r"^([0-9]?[ก-ฮA-Z]{1,3})([0-9]{1,4})$", compact)
     if m:
         return f"{m.group(1)} {m.group(2)}"
-    return re.sub(r"[\s\-]+", " ", cleaned).strip()
+    return re.sub(r"[\s\-]+", " ", cleaned).strip()[:15]
 
 
 def _validate_appointment_date_str(v: str) -> str:
@@ -115,6 +115,7 @@ class CustomerCreate(BaseModel):
     Address:            str | None = Field(default=None, max_length=500)
     PhoneNumber:        str = Field(min_length=9, max_length=20)
     Email:              str | None = Field(default=None, max_length=100)
+    LineID:             str | None = Field(default=None, max_length=50)
     CustomerTier:       AllowedCustomerTier = "Standard"
 
     @field_validator("CustomerName")
@@ -136,6 +137,13 @@ class CustomerCreate(BaseModel):
         if v is None or not v.strip():
             return None
         return _sanitize_text(v)
+
+    @field_validator("LineID")
+    @classmethod
+    def clean_line_id(cls, v: str | None) -> str | None:
+        if v is None or not v.strip():
+            return None
+        return _sanitize_text(v)[:50]
 
     @field_validator("Email")
     @classmethod
@@ -376,6 +384,11 @@ class StatusUpdateRequest(BaseModel):
 
     Status: AllowedJobStatus
     InternalNotes: str | None = Field(default=None, max_length=1000)
+    MechanicName: str | None = Field(default=None, max_length=100)
+    AppointmentDate: str | None = Field(default=None, min_length=10, max_length=10)
+    AppointmentTime: str | None = Field(default=None, min_length=5, max_length=8)
+    ServiceType: AllowedServiceType | None = None
+    Mileage: int | None = Field(default=None, ge=0, le=2_000_000)
 
     @field_validator("InternalNotes")
     @classmethod
@@ -383,6 +396,31 @@ class StatusUpdateRequest(BaseModel):
         if v is None:
             return None
         return _sanitize_text(v)
+
+    @field_validator("MechanicName")
+    @classmethod
+    def clean_mechanic_name(cls, v: str | None) -> str | None:
+        if v is None or not v.strip():
+            return None
+        return _sanitize_text(v)
+
+    @field_validator("AppointmentDate")
+    @classmethod
+    def clean_appt_date(cls, v: str | None) -> str | None:
+        if v is None or not v.strip():
+            return None
+        try:
+            parsed = datetime.strptime(v.strip(), "%Y-%m-%d").date()
+            return parsed.strftime("%Y-%m-%d")
+        except ValueError:
+            raise ValueError("รูปแบบวันที่ไม่ถูกต้อง (YYYY-MM-DD)")
+
+    @field_validator("AppointmentTime")
+    @classmethod
+    def clean_appt_time(cls, v: str | None) -> str | None:
+        if v is None or not v.strip():
+            return None
+        return _validate_appointment_time_str(v)
 
 
 class AdminLoginRequest(BaseModel):

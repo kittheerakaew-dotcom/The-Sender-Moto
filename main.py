@@ -56,7 +56,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=_allowed_origins,
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "OPTIONS"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["Content-Type", "X-Admin-Key", "Authorization"],
 )
 
@@ -177,9 +177,15 @@ def _ensure_phase_b_columns(cursor, connect):
         return
     try:
         cursor.execute("SHOW COLUMNS FROM Customers")
-        cust_cols = {row[0].lower() for row in cursor.fetchall()}
+        cust_rows = cursor.fetchall()
+        cust_cols = {row[0].lower(): str(row[1]).lower() for row in cust_rows}
         if "lineid" not in cust_cols:
-            cursor.execute("ALTER TABLE Customers ADD COLUMN LineID VARCHAR(100) DEFAULT NULL")
+            cursor.execute("ALTER TABLE Customers ADD COLUMN LineID VARCHAR(50) DEFAULT NULL")
+        if "phonenumber" in cust_cols and "char(10)" not in cust_cols["phonenumber"]:
+            cursor.execute(
+                "UPDATE Customers SET PhoneNumber = LEFT(REPLACE(REPLACE(REPLACE(REPLACE(TRIM(PhoneNumber), '-', ''), ' ', ''), '(', ''), ')', ''), 10) WHERE PhoneNumber IS NOT NULL"
+            )
+            cursor.execute("ALTER TABLE Customers MODIFY COLUMN PhoneNumber CHAR(10) NOT NULL")
 
         cursor.execute("SHOW COLUMNS FROM Vehicles")
         veh_cols = {row[0].lower() for row in cursor.fetchall()}
@@ -510,7 +516,16 @@ def get_customers():
 
     cursor = connect.cursor(dictionary = True)
     try:
-        cursor.execute("SELECT * FROM Customers ORDER BY CustomerID DESC")
+        _ensure_phase_b_columns(cursor, connect)
+        cursor.execute(
+            """
+            SELECT c.*,
+                   (SELECT COUNT(*) FROM Vehicles v WHERE v.CustomerID = c.CustomerID) AS VehicleCount,
+                   (SELECT COUNT(*) FROM Appointments a WHERE a.CustomerID = c.CustomerID) AS AppointmentCount
+            FROM Customers c
+            ORDER BY c.CustomerID DESC
+            """
+        )
         result = cursor.fetchall()
         return {"status": "Success", "data": result}
     except mysql.connector.Error as e:
@@ -527,13 +542,17 @@ def create_customer(customer: CustomerCreate):
         return {"status": "Failed", "message": "failed to create customer, Database connection error"}
     
     cursor = connect.cursor()
-    sql = """
-        INSERT INTO Customers (CustomerName, Address, PhoneNumber, Email, CustomerTier) 
-        VALUES (%s, %s, %s, %s, %s)
-    """
-    val = (customer.CustomerName, customer.Address, customer.PhoneNumber, customer.Email, customer.CustomerTier)
-
     try:
+        _ensure_phase_b_columns(cursor, connect)
+        cursor.execute("SELECT CustomerID FROM Customers WHERE PhoneNumber = %s LIMIT 1", (customer.PhoneNumber,))
+        if cursor.fetchone():
+            return {"status": "Failed", "message": "เบอร์โทรศัพท์นี้มีในระบบแล้ว กรุณาตรวจสอบรายชื่อลูกค้า"}
+
+        sql = """
+            INSERT INTO Customers (CustomerName, Address, PhoneNumber, Email, LineID, CustomerTier) 
+            VALUES (%s, %s, %s, %s, %s, %s)
+        """
+        val = (customer.CustomerName, customer.Address, customer.PhoneNumber, customer.Email, customer.LineID, customer.CustomerTier)
         cursor.execute(sql, val)
         connect.commit()
         return {"status": "Success", "message": "บันทึกข้อมูลลูกค้าสำเร็จ"}
@@ -541,6 +560,77 @@ def create_customer(customer: CustomerCreate):
         connect.rollback()
         _log_db_error("create_customer", e)
         return {"status": "Failed", "message": "ไม่สามารถเพิ่มข้อมูลลูกค้าได้"}
+    finally:
+        cursor.close()
+        connect.close()
+
+
+@app.put("/customers/{customer_id}")
+def update_customer(customer: CustomerCreate, customer_id: int = Path(..., gt=0)):
+    connect = get_data_connection()
+    if not connect:
+        return {"status": "Failed", "message": "Database connection error"}
+
+    cursor = connect.cursor()
+    try:
+        _ensure_phase_b_columns(cursor, connect)
+        cursor.execute("SELECT CustomerID FROM Customers WHERE CustomerID = %s LIMIT 1", (customer_id,))
+        if not cursor.fetchone():
+            return {"status": "Failed", "message": "ไม่พบข้อมูลลูกค้ารายนี้"}
+
+        cursor.execute(
+            "SELECT CustomerID FROM Customers WHERE PhoneNumber = %s AND CustomerID != %s LIMIT 1",
+            (customer.PhoneNumber, customer_id),
+        )
+        if cursor.fetchone():
+            return {"status": "Failed", "message": "เบอร์โทรศัพท์นี้ถูกใช้งานโดยลูกค้ารายอื่นแล้ว"}
+
+        cursor.execute(
+            """
+            UPDATE Customers
+            SET CustomerName = %s, Address = %s, PhoneNumber = %s, Email = %s, LineID = %s, CustomerTier = %s
+            WHERE CustomerID = %s
+            """,
+            (
+                customer.CustomerName,
+                customer.Address,
+                customer.PhoneNumber,
+                customer.Email,
+                customer.LineID,
+                customer.CustomerTier,
+                customer_id,
+            ),
+        )
+        connect.commit()
+        return {"status": "Success", "message": "อัปเดตข้อมูลลูกค้าเรียบร้อยแล้ว"}
+    except mysql.connector.Error as e:
+        connect.rollback()
+        _log_db_error("update_customer", e)
+        return {"status": "Failed", "message": "ไม่สามารถแก้ไขข้อมูลลูกค้าได้"}
+    finally:
+        cursor.close()
+        connect.close()
+
+
+@app.delete("/customers/{customer_id}")
+def delete_customer(customer_id: int = Path(..., gt=0)):
+    connect = get_data_connection()
+    if not connect:
+        return {"status": "Failed", "message": "Database connection error"}
+
+    cursor = connect.cursor()
+    try:
+        cursor.execute("SELECT CustomerID FROM Customers WHERE CustomerID = %s LIMIT 1", (customer_id,))
+        if not cursor.fetchone():
+            return {"status": "Failed", "message": "ไม่พบข้อมูลลูกค้ารายนี้"}
+
+        cursor.execute("DELETE FROM Customers WHERE CustomerID = %s", (customer_id,))
+        connect.commit()
+        return {"status": "Success", "message": "ลบข้อมูลลูกค้าเรียบร้อยแล้ว"}
+    except mysql.connector.Error as e:
+        connect.rollback()
+        _log_db_error("delete_customer", e)
+        return {"status": "Failed", "message": "ไม่สามารถลบข้อมูลลูกค้าได้"}
     finally:
         cursor.close()
         connect.close()
@@ -1315,7 +1405,7 @@ def accept_appointment(appointment_id: int = Path(..., gt=0)):
 
 @app.put("/appointments/{appointment_id}/status")
 def update_appointment_status(req: StatusUpdateRequest, appointment_id: int = Path(..., gt=0)):
-    """เปลี่ยนสถานะคิวนัดหมายตามวงจรงานซ่อม และบันทึกหมายเหตุภายในสำหรับช่าง"""
+    """เปลี่ยนสถานะคิวนัดหมาย แก้ไขวัน-เวลา/เลขไมล์ และบันทึกหมายเหตุภายในสำหรับช่าง"""
     connect = get_data_connection()
     if not connect:
         return {"status": "Failed", "message": "Database connection error"}
@@ -1326,6 +1416,28 @@ def update_appointment_status(req: StatusUpdateRequest, appointment_id: int = Pa
         cursor.execute("SELECT AppointmentID FROM Appointments WHERE AppointmentID = %s LIMIT 1", (appointment_id,))
         if not cursor.fetchone():
             return {"status": "Failed", "message": "ไม่พบรายการนัดหมายนี้"}
+
+        if req.AppointmentDate:
+            cursor.execute(
+                "UPDATE Appointments SET AppointmentDate = %s WHERE AppointmentID = %s",
+                (req.AppointmentDate, appointment_id)
+            )
+        if req.AppointmentTime:
+            cursor.execute(
+                "UPDATE Appointments SET AppointmentTime = %s WHERE AppointmentID = %s",
+                (f"{req.AppointmentTime[:5]}:00", appointment_id)
+            )
+        if req.ServiceType:
+            est_mins = SERVICE_DURATION_MINUTES.get(req.ServiceType, 90)
+            cursor.execute(
+                "UPDATE Appointments SET ServiceType = %s, EstimatedMinutes = %s WHERE AppointmentID = %s",
+                (req.ServiceType, est_mins, appointment_id)
+            )
+        if req.Mileage is not None:
+            cursor.execute(
+                "UPDATE Appointments SET Mileage = %s WHERE AppointmentID = %s",
+                (req.Mileage, appointment_id)
+            )
 
         if req.InternalNotes is not None:
             cursor.execute(
@@ -1342,13 +1454,15 @@ def update_appointment_status(req: StatusUpdateRequest, appointment_id: int = Pa
                 (req.Status, appointment_id)
             )
 
+        mechanic = req.MechanicName or "ช่างประจำศูนย์"
+
         # หากเปลี่ยนเป็น In Progress และยังไม่มีใบงานใน Service_Jobs ให้สร้างใบงานอัตโนมัติ หรือซิงก์สถานะ
         if req.Status == "In Progress":
             cursor.execute("SELECT JobID FROM Service_Jobs WHERE AppointmentID = %s LIMIT 1", (appointment_id,))
             if not cursor.fetchone():
                 cursor.execute(
                     "INSERT INTO Service_Jobs (AppointmentID, MechanicName, JobStatus, InternalNotes) VALUES (%s, %s, 'In Progress', %s)",
-                    (appointment_id, 'ช่างประจำศูนย์', req.InternalNotes)
+                    (appointment_id, mechanic, req.InternalNotes)
                 )
             else:
                 cursor.execute(
@@ -1362,11 +1476,41 @@ def update_appointment_status(req: StatusUpdateRequest, appointment_id: int = Pa
             )
 
         connect.commit()
-        return {"status": "Success", "message": "อัปเดตสถานะนัดหมายเรียบร้อยแล้ว"}
+        return {"status": "Success", "message": "อัปเดตข้อมูลและสถานะนัดหมายเรียบร้อยแล้ว"}
     except mysql.connector.Error as e:
         connect.rollback()
         _log_db_error("update_appointment_status", e)
         return {"status": "Failed", "message": "ไม่สามารถอัปเดตสถานะได้"}
+    finally:
+        cursor.close()
+        connect.close()
+
+
+@app.delete("/appointments/{appointment_id}")
+def delete_appointment(appointment_id: int = Path(..., gt=0)):
+    """ลบคิวซ่อมออกจากระบบถาวร (สำหรับคิวที่กรอกผิดพลาด คิวทดสอบ หรือข้อมูลขยะ)"""
+    connect = get_data_connection()
+    if not connect:
+        return {"status": "Failed", "message": "Database connection error"}
+
+    cursor = connect.cursor()
+    try:
+        cursor.execute("SELECT AppointmentID FROM Appointments WHERE AppointmentID = %s LIMIT 1", (appointment_id,))
+        if not cursor.fetchone():
+            return {"status": "Failed", "message": "ไม่พบรายการนัดหมายนี้"}
+
+        # ลบใบงานที่ผูกอยู่ก่อน (เผื่อกรณีบางตารางเดิมไม่ได้เปิด ON DELETE CASCADE)
+        cursor.execute("SELECT JobID FROM Service_Jobs WHERE AppointmentID = %s", (appointment_id,))
+        for (job_id,) in cursor.fetchall():
+            cursor.execute("DELETE FROM Service_Items WHERE JobID = %s", (job_id,))
+        cursor.execute("DELETE FROM Service_Jobs WHERE AppointmentID = %s", (appointment_id,))
+        cursor.execute("DELETE FROM Appointments WHERE AppointmentID = %s", (appointment_id,))
+        connect.commit()
+        return {"status": "Success", "message": "ลบคิวนัดหมายออกจากระบบเรียบร้อยแล้ว"}
+    except mysql.connector.Error as e:
+        connect.rollback()
+        _log_db_error("delete_appointment", e)
+        return {"status": "Failed", "message": "ไม่สามารถลบคิวนัดหมายได้"}
     finally:
         cursor.close()
         connect.close()
@@ -1410,7 +1554,7 @@ def get_jobs():
 
 @app.put("/jobs/{job_id}/status")
 def update_job_status(req: StatusUpdateRequest, job_id: int = Path(..., gt=0)):
-    """อัปเดตสถานะใบงานซ่อมและหมายเหตุช่าง พร้อมซิงก์สถานะกลับไปยังตารางนัดหมาย"""
+    """อัปเดตสถานะใบงานซ่อม ชื่อช่าง และหมายเหตุช่าง พร้อมซิงก์สถานะกลับไปยังตารางนัดหมาย"""
     connect = get_data_connection()
     if not connect:
         return {"status": "Failed", "message": "Database connection error"}
@@ -1423,6 +1567,12 @@ def update_job_status(req: StatusUpdateRequest, job_id: int = Path(..., gt=0)):
         if not row:
             return {"status": "Failed", "message": "ไม่พบใบงานซ่อมนี้"}
         appt_id = row[0]
+
+        if req.MechanicName:
+            cursor.execute(
+                "UPDATE Service_Jobs SET MechanicName = %s WHERE JobID = %s",
+                (req.MechanicName, job_id)
+            )
 
         if req.InternalNotes is not None:
             cursor.execute(
@@ -1443,11 +1593,89 @@ def update_job_status(req: StatusUpdateRequest, job_id: int = Path(..., gt=0)):
                 (req.Status, appt_id)
             )
         connect.commit()
-        return {"status": "Success", "message": "อัปเดตสถานะใบงานซ่อมเรียบร้อยแล้ว"}
+        return {"status": "Success", "message": "อัปเดตข้อมูลใบงานซ่อมเรียบร้อยแล้ว"}
     except mysql.connector.Error as e:
         connect.rollback()
         _log_db_error("update_job_status", e)
         return {"status": "Failed", "message": "ไม่สามารถอัปเดตสถานะใบงานได้"}
+    finally:
+        cursor.close()
+        connect.close()
+
+
+@app.delete("/jobs/{job_id}")
+def delete_job(job_id: int = Path(..., gt=0)):
+    """ลบใบงานซ่อมที่เปิดผิดพลาด และคืนสถานะคิวนัดหมายกลับเป็น Confirmed"""
+    connect = get_data_connection()
+    if not connect:
+        return {"status": "Failed", "message": "Database connection error"}
+
+    cursor = connect.cursor()
+    try:
+        cursor.execute("SELECT AppointmentID FROM Service_Jobs WHERE JobID = %s LIMIT 1", (job_id,))
+        row = cursor.fetchone()
+        if not row:
+            return {"status": "Failed", "message": "ไม่พบใบงานซ่อมนี้"}
+        appt_id = row[0]
+
+        cursor.execute("DELETE FROM Service_Items WHERE JobID = %s", (job_id,))
+        cursor.execute("DELETE FROM Service_Jobs WHERE JobID = %s", (job_id,))
+        cursor.execute(
+            "UPDATE Appointments SET Status = 'Confirmed' WHERE AppointmentID = %s AND Status IN ('In Progress', 'Ready')",
+            (appt_id,)
+        )
+        connect.commit()
+        return {"status": "Success", "message": "ลบใบงานซ่อมเรียบร้อยแล้ว"}
+    except mysql.connector.Error as e:
+        connect.rollback()
+        _log_db_error("delete_job", e)
+        return {"status": "Failed", "message": "ไม่สามารถลบใบงานซ่อมได้"}
+    finally:
+        cursor.close()
+        connect.close()
+
+
+@app.delete("/jobs/{job_id}/items/{item_id}")
+def delete_job_item(job_id: int = Path(..., gt=0), item_id: int = Path(..., gt=0)):
+    """ลบรายการอะไหล่/ค่าแรงที่คีย์ผิดออกจากใบงาน และคำนวณยอดรวมใหม่ทันที"""
+    connect = get_data_connection()
+    if not connect:
+        return {"status": "Failed", "message": "Database connection error"}
+
+    cursor = connect.cursor()
+    try:
+        cursor.execute(
+            "SELECT JobStatus FROM Service_Jobs WHERE JobID = %s LIMIT 1",
+            (job_id,)
+        )
+        job_row = cursor.fetchone()
+        if not job_row:
+            return {"status": "Failed", "message": "ไม่พบใบงานซ่อมนี้"}
+        if job_row[0] in ("Completed", "Cancelled"):
+            return {"status": "Failed", "message": "ใบงานซ่อมนี้ปิดหรือยกเลิกแล้ว ไม่สามารถลบรายการได้"}
+
+        cursor.execute(
+            "SELECT ItemID FROM Service_Items WHERE ItemID = %s AND JobID = %s LIMIT 1",
+            (item_id, job_id)
+        )
+        if not cursor.fetchone():
+            return {"status": "Failed", "message": "ไม่พบรายการอะไหล่นี้ในใบงาน"}
+
+        cursor.execute("DELETE FROM Service_Items WHERE ItemID = %s AND JobID = %s", (item_id, job_id))
+        cursor.execute(
+            """
+            UPDATE Service_Jobs
+            SET TotalCost = COALESCE((SELECT SUM(Quantity * UnitPrice) FROM Service_Items WHERE JobID = %s), 0.00)
+            WHERE JobID = %s
+            """,
+            (job_id, job_id)
+        )
+        connect.commit()
+        return {"status": "Success", "message": "ลบรายการอะไหล่และคำนวณยอดรวมใหม่เรียบร้อยแล้ว"}
+    except mysql.connector.Error as e:
+        connect.rollback()
+        _log_db_error("delete_job_item", e)
+        return {"status": "Failed", "message": "ไม่สามารถลบรายการอะไหล่ได้"}
     finally:
         cursor.close()
         connect.close()
@@ -1504,7 +1732,8 @@ def get_job_receipt(job_id: int = Path(..., gt=0)):
     cursor = connect.cursor(dictionary=True)
     try:
         cursor.execute("""
-            SELECT j.JobID, j.TotalCost, 
+            SELECT j.JobID, j.MechanicName, j.JobStatus, j.TotalCost, 
+                   a.BookingRef, a.AppointmentDate, a.ServiceType,
                    v.CarBrand, v.CarModel, v.CarNumber,
                    c.CustomerName, c.PhoneNumber
             FROM Service_Jobs j
@@ -1514,8 +1743,10 @@ def get_job_receipt(job_id: int = Path(..., gt=0)):
             WHERE j.JobID = %s
         """, (job_id,))
         job_info = cursor.fetchone()
+        if job_info and "AppointmentDate" in job_info and job_info["AppointmentDate"] is not None:
+            job_info["AppointmentDate"] = str(job_info["AppointmentDate"])
 
-        cursor.execute("SELECT ItemName, Quantity, UnitPrice FROM Service_Items WHERE JobID = %s", (job_id,))
+        cursor.execute("SELECT ItemID, ItemName, Quantity, UnitPrice FROM Service_Items WHERE JobID = %s ORDER BY ItemID ASC", (job_id,))
         items = cursor.fetchall()
 
         if not job_info:

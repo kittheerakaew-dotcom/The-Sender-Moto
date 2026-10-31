@@ -185,12 +185,49 @@ def run_tests():
         job_id = jobs[0]["JobID"]
 
         upd_job = main.update_job_status(
-            schemas.StatusUpdateRequest(Status="Ready", InternalNotes="ซ่อมเสร็จพร้อมส่งมอบ"),
+            schemas.StatusUpdateRequest(Status="Ready", MechanicName="ช่างเอก", InternalNotes="ซ่อมเสร็จพร้อมส่งมอบ"),
             job_id=job_id,
         )
         assert upd_job["status"] == "Success", upd_job
 
-        print("ALL PHASE C TESTS PASSED SUCCESSFULLY!")
+        # 7. ทดสอบเพิ่มรายการอะไหล่ ตรวจสอบใบเสร็จ และลบรายการอะไหล่ที่คีย์ผิด
+        add_it = main.add_job_item(
+            schemas.ServiceItemCreate(ItemName="น้ำมันเครื่องสังเคราะห์แท้ Porsche", Quantity=2, UnitPrice=1500),
+            job_id=job_id,
+        )
+        assert add_it["status"] == "Success", add_it
+
+        receipt1 = main.get_job_receipt(job_id=job_id)
+        assert receipt1["status"] == "Success" and float(receipt1["job_info"]["TotalCost"]) == 3000.0, receipt1
+        item_id = receipt1["items"][0]["ItemID"]
+
+        del_it = main.delete_job_item(job_id=job_id, item_id=item_id)
+        assert del_it["status"] == "Success", del_it
+
+        receipt2 = main.get_job_receipt(job_id=job_id)
+        assert float(receipt2["job_info"]["TotalCost"]) == 0.0, receipt2
+
+        # 8. ทดสอบแก้ไขลูกค้า ลบใบงาน และลบคิวนัดหมาย
+        custs = main.get_customers()["data"]
+        cust1_id = custs[0]["CustomerID"]
+        upd_cust = main.update_customer(
+            schemas.CustomerCreate(
+                CustomerName="วิชัย รักรถยุโรป",
+                PhoneNumber="0898765432",
+                CustomerTier="VIP",
+                LineID="@wichai_vip",
+            ),
+            customer_id=cust1_id,
+        )
+        assert upd_cust["status"] == "Success", upd_cust
+
+        del_job = main.delete_job(job_id=job_id)
+        assert del_job["status"] == "Success", del_job
+
+        del_appt = main.delete_appointment(appointment_id=appt2_id)
+        assert del_appt["status"] == "Success", del_appt
+
+        print("ALL PHASE C & ADMIN CRUD TESTS PASSED SUCCESSFULLY!")
     finally:
         if database._cached_connection:
             try:
