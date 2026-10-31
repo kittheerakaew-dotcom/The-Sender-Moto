@@ -170,13 +170,98 @@ def _hash_client_ip(request: Request | None) -> str:
 
 
 def _ensure_phase_b_columns(_cursor, connect):
-    """ตรวจสอบและเพิ่มคอลัมน์ใหม่แบบ Idempotent (ใช้ Tuple Cursor แยกต่างหากเพื่อไม่ให้ชนกับ Dictionary Cursor)"""
+    """ตรวจสอบและสร้างตาราง/คอลัมน์ใหม่แบบ Idempotent (รองรับการเชื่อมต่อฐานข้อมูล TiDB Cloud ใหม่ทันทีโดยไม่ต้องรัน SQL เอง)"""
     global _schema_checked_db
     current_db = getattr(connect, "database", None) or os.getenv("DB_NAME", "")
     if _schema_checked_db == current_db and current_db:
         return
     ddl_cursor = connect.cursor()
     try:
+        ddl_cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS Customers (
+                CustomerID INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                CustomerName VARCHAR(100) NOT NULL,
+                Address VARCHAR(500) DEFAULT NULL,
+                PhoneNumber CHAR(10) NOT NULL,
+                Email VARCHAR(100) DEFAULT NULL,
+                LineID VARCHAR(50) DEFAULT NULL,
+                CustomerTier ENUM('Standard', 'Premium', 'VIP') NOT NULL DEFAULT 'Standard',
+                UNIQUE INDEX idx_customers_phone (PhoneNumber)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+            """
+        )
+        ddl_cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS Vehicles (
+                VehicleID INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                CustomerID INT UNSIGNED NOT NULL,
+                CarBrand ENUM('Mercedes-Benz', 'BMW', 'Audi', 'Porsche', 'Volkswagen', 'Volvo', 'MINI', 'Land Rover') NOT NULL,
+                CarNumber VARCHAR(15) NOT NULL,
+                CarModel VARCHAR(80) NOT NULL DEFAULT '',
+                CarYear SMALLINT UNSIGNED DEFAULT NULL,
+                VINCODE CHAR(17) UNIQUE NOT NULL,
+                INDEX idx_vehicles_carnumber (CarNumber),
+                FOREIGN KEY (CustomerID) REFERENCES Customers(CustomerID) ON DELETE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+            """
+        )
+        ddl_cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS Appointments (
+                AppointmentID INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                BookingRef CHAR(14) DEFAULT NULL,
+                CustomerID INT UNSIGNED NOT NULL,
+                VehicleID INT UNSIGNED NOT NULL,
+                AppointmentDate DATE NOT NULL,
+                AppointmentTime TIME NOT NULL,
+                ServiceType ENUM('General Maintenance', 'Engine Repair', 'Suspension', 'Diagnostics') NOT NULL,
+                EstimatedMinutes SMALLINT UNSIGNED NOT NULL DEFAULT 90,
+                Mileage INT UNSIGNED DEFAULT NULL,
+                Notes VARCHAR(500) DEFAULT NULL,
+                InternalNotes VARCHAR(1000) DEFAULT NULL,
+                PhotoURL MEDIUMTEXT DEFAULT NULL,
+                Status ENUM('Pending', 'Confirmed', 'In Progress', 'Ready', 'Completed', 'Cancelled', 'No-Show') NOT NULL DEFAULT 'Pending',
+                CreatedAtUTC DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                ConsentAtUTC DATETIME DEFAULT NULL,
+                ConsentVersion VARCHAR(10) NOT NULL DEFAULT 'v1.0',
+                IdempotencyKey VARCHAR(64) DEFAULT NULL,
+                NotificationStatus ENUM('Pending', 'Sent', 'Failed', 'Skipped') NOT NULL DEFAULT 'Pending',
+                UNIQUE INDEX idx_appointments_bookingref (BookingRef),
+                UNIQUE INDEX idx_appointments_idempotency (IdempotencyKey),
+                INDEX idx_appointments_datetime (AppointmentDate, AppointmentTime),
+                INDEX idx_appointments_notify_status (NotificationStatus),
+                FOREIGN KEY (CustomerID) REFERENCES Customers(CustomerID) ON DELETE CASCADE,
+                FOREIGN KEY (VehicleID) REFERENCES Vehicles(VehicleID) ON DELETE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+            """
+        )
+        ddl_cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS Service_Jobs (
+                JobID INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                AppointmentID INT UNSIGNED NOT NULL,
+                MechanicName VARCHAR(100) NOT NULL DEFAULT 'ช่างประจำศูนย์',
+                JobStatus ENUM('In Progress', 'Ready', 'Completed', 'Cancelled') NOT NULL DEFAULT 'In Progress',
+                InternalNotes VARCHAR(1000) DEFAULT NULL,
+                TotalCost DECIMAL(10, 2) NOT NULL DEFAULT 0.00,
+                FOREIGN KEY (AppointmentID) REFERENCES Appointments(AppointmentID) ON DELETE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+            """
+        )
+        ddl_cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS Service_Items (
+                ItemID INT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+                JobID INT UNSIGNED NOT NULL,
+                ItemName VARCHAR(150) NOT NULL,
+                Quantity SMALLINT UNSIGNED NOT NULL DEFAULT 1,
+                UnitPrice DECIMAL(10, 2) NOT NULL DEFAULT 0.00,
+                FOREIGN KEY (JobID) REFERENCES Service_Jobs(JobID) ON DELETE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+            """
+        )
+
         ddl_cursor.execute("SHOW COLUMNS FROM Customers")
         cust_rows = ddl_cursor.fetchall()
         cust_cols = {str(row[0]).lower(): str(row[1]).lower() for row in cust_rows}

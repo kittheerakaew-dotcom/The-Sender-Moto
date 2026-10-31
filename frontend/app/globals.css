@@ -1,0 +1,99 @@
+@import "tailwindcss";
+
+:root {
+  /* Slate Carbon & Bavarian Cobalt — Quiet Luxury Design Tokens */
+  --background: #0b0f17;
+  --foreground: #f8fafc;
+  --surface-dark: #0b0f17;
+  --surface-card: #111827;
+  --surface-elevated: #1e293b;
+  --surface-light: #f8fafc;
+  --text-primary: #f8fafc;
+  --text-secondary: #94a3b8;
+  --text-muted: #64748b;
+  --accent-cobalt: #2563eb;
+  --accent-cobalt-hover: #3b82f6;
+  --accent-cobalt-light: #60a5fa;
+  --accent-cobalt-soft: rgba(37, 99, 235, 0.14);
+  --border-subtle: rgba(148, 163, 184, 0.16);
+
+  /* Spacing & Radius Tokens */
+  --space-section: 5rem;
+  --radius-sm: 0.5rem;
+  --radius-md: 0.75rem;
+  --radius-lg: 1rem;
+  --radius-xl: 1.5rem;
+
+  /* Shadows */
+  --shadow-card: 0 10px 30px -10px rgba(2, 6, 23, 0.6);
+  --shadow-elevated: 0 20px 45px -15px rgba(2, 6, 23, 0.8);
+  --shadow-cobalt-glow: 0 0 36px rgba(37, 99, 235, 0.35);
+
+  /* Breakpoints Reference */
+  --bp-sm: 640px;
+  --bp-md: 768px;
+  --bp-lg: 1024px;
+  --bp-xl: 1280px;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-heading: var(--font-noto-thai), var(--font-plus-jakarta), sans-serif;
+  --font-sans: var(--font-noto-thai), var(--font-plus-jakarta), sans-serif;
+  --font-mono: var(--font-geist-mono);
+}
+
+html {
+  scroll-behavior: smooth;
+  overflow-x: hidden;
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-noto-thai), var(--font-plus-jakarta), Arial, Helvetica, sans-serif;
+  line-height: 1.75;
+  letter-spacing: 0;
+  overflow-x: hidden;
+}
+
+h1, h2, h3, h4 {
+  font-family: var(--font-noto-thai), var(--font-plus-jakarta), sans-serif;
+  line-height: 1.4;
+  letter-spacing: 0;
+}
+
+/* WCAG 2.2 AA — Visible Keyboard Focus Ring */
+a:focus-visible,
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  outline: 2px solid var(--accent-cobalt-hover);
+  outline-offset: 2px;
+}
+
+/* ป้องกัน Chrome Autofill เปลี่ยนพื้นหลังช่องกรอกข้อมูลโหมดมืดเป็นสีขาวสว่างจ้า */
+input.bg-slate-800:-webkit-autofill,
+input.bg-slate-800:-webkit-autofill:hover,
+input.bg-slate-800:-webkit-autofill:focus {
+  -webkit-text-fill-color: #f8fafc;
+  -webkit-box-shadow: 0 0 0px 1000px #1e293b inset;
+  transition: background-color 5000s ease-in-out 0s;
+}
+
+/* WCAG 2.2 AA — Respect Reduced Motion Preferences */
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
