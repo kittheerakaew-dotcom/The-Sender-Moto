@@ -3,7 +3,7 @@
   "version": 2,
   "framework": "nextjs",
   "regions": ["sin1"],
-  "installCommand": "npm --prefix frontend install",
+  "installCommand": "npm --prefix frontend install && ln -sfn frontend/node_modules node_modules && cp -rf frontend/public public",
   "buildCommand": "npm --prefix frontend run build",
   "outputDirectory": "frontend/.next",
   "rewrites": [
