@@ -346,7 +346,7 @@ class BookingCreate(BaseModel):
 class BookingLookupRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
-    BookingRef: str = Field(min_length=1, max_length=30)
+    BookingRef: str | None = Field(default="", max_length=30)
     PhoneNumber: str = Field(min_length=9, max_length=20)
 
     @field_validator("PhoneNumber")

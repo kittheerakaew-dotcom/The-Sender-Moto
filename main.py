@@ -1227,7 +1227,7 @@ def create_booking(booking: BookingCreate, request: Request = None):
 
 @app.post("/bookings/lookup")
 def lookup_booking(req: BookingLookupRequest, request: Request = None):
-    """ให้ลูกค้าค้นหาสถานะคิวซ่อมด้วยรหัสการจอง (BookingRef หรือ #BK-ID) คู่กับเบอร์โทรศัพท์"""
+    """ให้ลูกค้าค้นหาสถานะคิวซ่อมด้วยเบอร์โทรศัพท์เพียงอย่างเดียว หรือเบอร์โทรศัพท์คู่กับทะเบียนรถ / รหัสการจอง"""
     connect = get_data_connection()
     if not connect:
         return {"status": "Failed", "message": "ไม่สามารถเชื่อมต่อฐานข้อมูลได้"}
@@ -1239,9 +1239,8 @@ def lookup_booking(req: BookingLookupRequest, request: Request = None):
         if not _check_serverless_rate_limit(cursor, connect, "lookup", ip_hash, max_hits=15, window_sec=600):
             return {"status": "Failed", "message": "คุณค้นหาข้อมูลบ่อยเกินไป กรุณารอสักครู่แล้วลองใหม่"}
 
-        cond_sql, ref_val = _parse_booking_ref_condition(req.BookingRef)
-        cursor.execute(
-            f"""
+        raw_query = (req.BookingRef or "").strip()
+        base_select = """
             SELECT a.AppointmentID, a.BookingRef, a.AppointmentDate, a.AppointmentTime,
                    a.ServiceType, a.EstimatedMinutes, a.Mileage, a.Notes, a.Status,
                    c.CustomerName, c.PhoneNumber,
@@ -1249,19 +1248,53 @@ def lookup_booking(req: BookingLookupRequest, request: Request = None):
             FROM Appointments a
             JOIN Customers c ON a.CustomerID = c.CustomerID
             JOIN Vehicles v ON a.VehicleID = v.VehicleID
-            WHERE {cond_sql} AND c.PhoneNumber = %s
-            LIMIT 1
-            """,
-            (ref_val, req.PhoneNumber)
-        )
-        appt = cursor.fetchone()
-        if not appt:
-            return {"status": "Failed", "message": "ไม่พบข้อมูลการจองคิว กรุณาตรวจสอบรหัสการจองและเบอร์โทรศัพท์"}
+        """
+        order_clause = """
+            ORDER BY
+                CASE WHEN a.Status IN ('Pending', 'Confirmed', 'In Progress', 'Ready') THEN 0 ELSE 1 END ASC,
+                a.AppointmentDate DESC,
+                a.AppointmentID DESC
+            LIMIT 10
+        """
 
-        appt["AppointmentDate"] = str(appt["AppointmentDate"])
-        appt["AppointmentTime"] = _format_time_hhmm(appt["AppointmentTime"])
-        appt["BookingRef"] = appt.get("BookingRef") or f"BK-{appt['AppointmentID']}"
-        return {"status": "Success", "data": appt}
+        if not raw_query:
+            cursor.execute(
+                f"{base_select} WHERE c.PhoneNumber = %s {order_clause}",
+                (req.PhoneNumber,),
+            )
+        else:
+            upper_q = raw_query.upper()
+            if upper_q.startswith("SM-") or upper_q.startswith("BK-") or upper_q.startswith("#") or upper_q.isdigit():
+                cond_sql, ref_val = _parse_booking_ref_condition(raw_query)
+                cursor.execute(
+                    f"{base_select} WHERE {cond_sql} AND c.PhoneNumber = %s {order_clause}",
+                    (ref_val, req.PhoneNumber),
+                )
+            else:
+                compact_plate = re.sub(r"[\s\-]+", "", upper_q)
+                cursor.execute(
+                    f"""
+                    {base_select}
+                    WHERE c.PhoneNumber = %s
+                      AND (
+                          REPLACE(REPLACE(UPPER(v.CarNumber), ' ', ''), '-', '') LIKE %s
+                          OR UPPER(a.BookingRef) = %s
+                      )
+                    {order_clause}
+                    """,
+                    (req.PhoneNumber, f"%{compact_plate}%", upper_q),
+                )
+
+        rows = cursor.fetchall()
+        if not rows:
+            return {"status": "Failed", "message": "ไม่พบข้อมูลการจองคิวจากเบอร์โทรศัพท์ที่ระบุ กรุณาตรวจสอบเบอร์โทรศัพท์อีกครั้ง"}
+
+        for item in rows:
+            item["AppointmentDate"] = str(item["AppointmentDate"])
+            item["AppointmentTime"] = _format_time_hhmm(item["AppointmentTime"])
+            item["BookingRef"] = item.get("BookingRef") or f"BK-{item['AppointmentID']}"
+
+        return {"status": "Success", "data": rows[0], "bookings": rows}
     except mysql.connector.Error as e:
         _log_db_error("lookup_booking", e)
         return {"status": "Failed", "message": "ไม่สามารถค้นหาข้อมูลการจองได้"}

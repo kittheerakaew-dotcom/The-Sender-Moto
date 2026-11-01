@@ -170,7 +170,7 @@ const SERVICE_CARDS = [
 const FAQ_ITEMS = [
   {
     q: "ควรจองคิวล่วงหน้ากี่วัน และสามารถเลื่อนหรือยกเลิกนัดเองได้ไหมครับ?",
-    a: "แนะนำให้จองล่วงหน้าอย่างน้อย 1 ชั่วโมงถึง 90 วันครับ หลังจองสำเร็จท่านจะได้รับรหัสอ้างอิง (เช่น SM-261105-XXXX) สามารถกดปุ่ม 'เช็กคิว / เลื่อนนัด' บนหน้าเว็บไซต์เพื่อเลื่อนวัน-เวลา หรือยกเลิกคิวได้ด้วยตนเองตลอด 24 ชั่วโมงครับ",
+    a: "แนะนำให้จองล่วงหน้าอย่างน้อย 1 ชั่วโมงถึง 90 วันครับ สามารถกดปุ่ม 'เช็กคิว / เลื่อนนัด' บนหน้าเว็บไซต์แล้วกรอกเพียงเบอร์โทรศัพท์ 10 หลักที่ใช้จอง (หรือกรอกคู่กับทะเบียนรถ) เพื่อตรวจสอบสถานะ เลื่อนวัน-เวลา หรือยกเลิกคิวได้ด้วยตนเองตลอด 24 ชั่วโมงโดยไม่ต้องจำรหัสจองครับ",
   },
   {
     q: "ทางอู่มีขั้นตอนการประเมินราคาอย่างไร มีค่าใช้จ่ายแอบแฝงไหมครับ?",
@@ -294,6 +294,7 @@ export default function LandingPage() {
   const [lookupError, setLookupError] = useState("");
   const [lookupMsg, setLookupMsg] = useState("");
   const [foundBooking, setFoundBooking] = useState<LookupAppointment | null>(null);
+  const [foundBookingsList, setFoundBookingsList] = useState<LookupAppointment[]>([]);
   const [rescheduleDate, setRescheduleDate] = useState("");
   const [rescheduleTime, setRescheduleTime] = useState("");
 
@@ -505,22 +506,30 @@ export default function LandingPage() {
         timeZone: "Asia/Bangkok",
       })
     );
+    const savedPhone =
+      prefillPhone ||
+      (typeof window !== "undefined" ? window.localStorage.getItem("sender_moto_last_phone") || "" : "");
     setLookupRef(prefillRef);
-    setLookupPhone(prefillPhone);
+    setLookupPhone(savedPhone);
     setLookupError("");
     setLookupMsg("");
     setFoundBooking(null);
+    setFoundBookingsList([]);
     setIsMobileNavOpen(false);
     setIsLookupOpen(true);
 
-    if (prefillRef.trim() && prefillPhone.trim()) {
+    if (savedPhone.trim().length >= 9) {
       setLookupLoading(true);
       try {
         const res = await axios.post(`${API_URL}/bookings/lookup`, {
           BookingRef: prefillRef.trim(),
-          PhoneNumber: normalizePhoneInput(prefillPhone),
+          PhoneNumber: normalizePhoneInput(savedPhone),
         });
         if (res.data?.status === "Success" && res.data.data) {
+          const list: LookupAppointment[] = Array.isArray(res.data.bookings)
+            ? res.data.bookings
+            : [res.data.data];
+          setFoundBookingsList(list);
           setFoundBooking(res.data.data);
           setRescheduleDate(res.data.data.AppointmentDate);
           setRescheduleTime(res.data.data.AppointmentTime.slice(0, 5));
@@ -566,6 +575,9 @@ export default function LandingPage() {
       };
       const response = await axios.post(`${API_URL}/bookings`, payload);
       if (response.data.status === "Success") {
+        if (typeof window !== "undefined") {
+          window.localStorage.setItem("sender_moto_last_phone", normalizedPhone);
+        }
         setBookingResult({
           bookingId: response.data.booking_id,
           bookingRef: response.data.booking_ref || `BK-${response.data.booking_id}`,
@@ -618,20 +630,30 @@ export default function LandingPage() {
     setLookupMsg("");
     setLookupLoading(true);
     try {
+      const cleanedPhone = normalizePhoneInput(lookupPhone);
       const res = await axios.post(`${API_URL}/bookings/lookup`, {
         BookingRef: lookupRef.trim(),
-        PhoneNumber: normalizePhoneInput(lookupPhone),
+        PhoneNumber: cleanedPhone,
       });
       if (res.data?.status === "Success" && res.data.data) {
+        if (typeof window !== "undefined") {
+          window.localStorage.setItem("sender_moto_last_phone", cleanedPhone);
+        }
+        const list: LookupAppointment[] = Array.isArray(res.data.bookings)
+          ? res.data.bookings
+          : [res.data.data];
+        setFoundBookingsList(list);
         setFoundBooking(res.data.data);
         setRescheduleDate(res.data.data.AppointmentDate);
         setRescheduleTime(res.data.data.AppointmentTime.slice(0, 5));
       } else {
         setFoundBooking(null);
-        setLookupError(res.data?.message || "ไม่พบข้อมูลการจองคิวครับ");
+        setFoundBookingsList([]);
+        setLookupError(res.data?.message || "ไม่พบข้อมูลการจองคิวจากเบอร์โทรศัพท์นี้ครับ");
       }
     } catch (err) {
       setFoundBooking(null);
+      setFoundBookingsList([]);
       if (axios.isAxiosError(err) && err.response?.data?.message) {
         setLookupError(err.response.data.message);
       } else {
@@ -657,11 +679,15 @@ export default function LandingPage() {
       });
       if (res.data?.status === "Success") {
         setLookupMsg(res.data.message);
-        setFoundBooking({
+        const updated = {
           ...foundBooking,
           AppointmentDate: rescheduleDate,
           AppointmentTime: rescheduleTime,
-        });
+        };
+        setFoundBooking(updated);
+        setFoundBookingsList((prev) =>
+          prev.map((b) => (b.AppointmentID === updated.AppointmentID ? updated : b))
+        );
       } else {
         setLookupError(res.data?.message || "ไม่สามารถเลื่อนนัดหมายได้ครับ");
       }
@@ -690,7 +716,11 @@ export default function LandingPage() {
       });
       if (res.data?.status === "Success") {
         setLookupMsg(res.data.message);
-        setFoundBooking({ ...foundBooking, Status: "Cancelled" });
+        const updated = { ...foundBooking, Status: "Cancelled" };
+        setFoundBooking(updated);
+        setFoundBookingsList((prev) =>
+          prev.map((b) => (b.AppointmentID === updated.AppointmentID ? updated : b))
+        );
       } else {
         setLookupError(res.data?.message || "ไม่สามารถยกเลิกนัดหมายได้ครับ");
       }
@@ -769,7 +799,7 @@ export default function LandingPage() {
               onClick={() => openLookupModal()}
               className="text-slate-300 hover:text-blue-400 transition-colors font-medium"
             >
-              ค้นหาสถานะคิวซ่อมด้วยรหัส SM-...
+              ค้นหาสถานะคิวซ่อมด้วยเบอร์โทรศัพท์
             </button>
           </div>
         </div>
@@ -861,7 +891,7 @@ export default function LandingPage() {
                   onClick={() => openLookupModal()}
                   className="flex-1 sm:flex-initial min-h-10 px-4 py-2 rounded-xl border border-slate-700 bg-slate-900 text-slate-200 text-xs font-semibold"
                 >
-                  ค้นหาสถานะ / เลื่อนนัด (SM-...)
+                  ค้นหาสถานะ / เลื่อนนัดด้วยเบอร์โทร
                 </button>
               </div>
               <div className="flex items-center justify-between sm:justify-end gap-3 text-xs text-slate-400 px-1">
@@ -2066,23 +2096,12 @@ export default function LandingPage() {
             </div>
 
             <div className="p-4 sm:p-6 space-y-5 text-slate-300 overflow-y-auto overscroll-contain">
-              <form onSubmit={handleLookupSubmit} className="grid grid-cols-1 sm:grid-cols-3 gap-3 items-end">
-                <div>
-                  <label htmlFor="lookup-ref" className="block text-xs text-slate-400 mb-1">
-                    รหัสการจอง (เช่น SM-261105-XXXX) *
-                  </label>
-                  <input
-                    id="lookup-ref"
-                    required
-                    type="text"
-                    value={lookupRef}
-                    onChange={(e) => setLookupRef(e.target.value)}
-                    placeholder="SM-XXXXXX-XXXX"
-                    className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500"
-                  />
-                </div>
-                <div>
-                  <label htmlFor="lookup-phone" className="block text-xs text-slate-400 mb-1">
+              <p className="text-xs sm:text-sm text-slate-400">
+                กรอกเพียง <strong className="text-white">เบอร์โทรศัพท์ 10 หลักที่ใช้จอง</strong> เพื่อดูสถานะคิวซ่อม เลื่อนวัน-เวลานัดหมาย หรือยกเลิกคิวได้ทันที (ไม่ต้องจำรหัสการจองครับ)
+              </p>
+              <form onSubmit={handleLookupSubmit} className="grid grid-cols-1 sm:grid-cols-12 gap-3 items-end">
+                <div className="sm:col-span-5">
+                  <label htmlFor="lookup-phone" className="block text-xs text-slate-300 font-semibold mb-1">
                     เบอร์โทรศัพท์ที่ใช้จอง (10 หลัก) *
                   </label>
                   <input
@@ -2093,17 +2112,32 @@ export default function LandingPage() {
                     maxLength={10}
                     value={lookupPhone}
                     onChange={(e) => setLookupPhone(e.target.value.replace(/\D/g, "").slice(0, 10))}
-                    placeholder="0808996645"
-                    className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white font-mono focus:outline-none focus:border-blue-500"
+                    placeholder="เช่น 0808996645"
+                    className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2.5 text-sm text-white font-mono focus:outline-none focus:border-blue-500"
                   />
                 </div>
-                <button
-                  type="submit"
-                  disabled={lookupLoading}
-                  className="py-2 px-4 bg-blue-600 hover:bg-blue-500 text-white font-bold rounded-lg text-sm transition-colors disabled:opacity-60"
-                >
-                  {lookupLoading ? "กำลังค้นหา..." : "ค้นหาคิวซ่อม"}
-                </button>
+                <div className="sm:col-span-4">
+                  <label htmlFor="lookup-ref" className="block text-xs text-slate-400 mb-1">
+                    ทะเบียนรถ / รหัสจอง (ไม่บังคับ)
+                  </label>
+                  <input
+                    id="lookup-ref"
+                    type="text"
+                    value={lookupRef}
+                    onChange={(e) => setLookupRef(e.target.value)}
+                    placeholder="เว้นว่างได้ หรือใส่ กข 1234"
+                    className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2.5 text-sm text-white focus:outline-none focus:border-blue-500"
+                  />
+                </div>
+                <div className="sm:col-span-3">
+                  <button
+                    type="submit"
+                    disabled={lookupLoading}
+                    className="w-full py-2.5 px-4 bg-blue-600 hover:bg-blue-500 text-white font-bold rounded-lg text-sm transition-colors disabled:opacity-60 cursor-pointer"
+                  >
+                    {lookupLoading ? "กำลังค้นหา..." : "ค้นหาคิวซ่อม"}
+                  </button>
+                </div>
               </form>
 
               {lookupError && (
@@ -2115,6 +2149,39 @@ export default function LandingPage() {
               {lookupMsg && (
                 <div className="p-3 rounded-lg bg-emerald-950/60 border border-emerald-700 text-emerald-200 text-sm">
                   {lookupMsg}
+                </div>
+              )}
+
+              {foundBookingsList.length > 1 && (
+                <div className="space-y-1.5">
+                  <span className="text-xs text-slate-400 block">
+                    พบรายการนัดหมายของเบอร์นี้ {foundBookingsList.length} รายการ (คลิกเลือกคิวที่ต้องการ):
+                  </span>
+                  <div className="flex flex-wrap gap-2">
+                    {foundBookingsList.map((item) => {
+                      const isSelected = foundBooking?.AppointmentID === item.AppointmentID;
+                      return (
+                        <button
+                          key={item.AppointmentID}
+                          type="button"
+                          onClick={() => {
+                            setFoundBooking(item);
+                            setRescheduleDate(item.AppointmentDate);
+                            setRescheduleTime(item.AppointmentTime.slice(0, 5));
+                            setLookupError("");
+                            setLookupMsg("");
+                          }}
+                          className={`px-3 py-1.5 rounded-lg text-xs font-semibold border transition-colors cursor-pointer ${
+                            isSelected
+                              ? "bg-blue-600 text-white border-blue-500"
+                              : "bg-slate-800 text-slate-300 border-slate-700 hover:border-blue-500/60"
+                          }`}
+                        >
+                          {item.CarBrand} ({item.CarNumber}) &bull; {item.AppointmentDate}
+                        </button>
+                      );
+                    })}
+                  </div>
                 </div>
               )}
 

@@ -142,7 +142,19 @@ def run_tests():
         assert avail["status"] == "Success"
         assert avail["booked_slots"].get("08:30") == 2, avail
 
-        # 5. ทดสอบลูกค้าค้นหาคิว / เลื่อนนัด / ยกเลิกนัดด้วยตนเอง
+        # 5. ทดสอบลูกค้าค้นหาคิวด้วยเบอร์โทรศัพท์อย่างเดียว / ทะเบียนรถ / รหัสการจอง
+        looked_by_phone = main.lookup_booking(
+            schemas.BookingLookupRequest(BookingRef="", PhoneNumber="0812345678"),
+            make_dummy_request("10.0.0.1"),
+        )
+        assert looked_by_phone["status"] == "Success" and looked_by_phone["data"]["BookingRef"] == ref1, looked_by_phone
+
+        looked_by_plate = main.lookup_booking(
+            schemas.BookingLookupRequest(BookingRef="1กข1234", PhoneNumber="0812345678"),
+            make_dummy_request("10.0.0.1"),
+        )
+        assert looked_by_plate["status"] == "Success" and looked_by_plate["data"]["BookingRef"] == ref1, looked_by_plate
+
         looked = main.lookup_booking(
             schemas.BookingLookupRequest(BookingRef=ref1, PhoneNumber="0812345678"),
             make_dummy_request("10.0.0.1"),
