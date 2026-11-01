@@ -33,6 +33,10 @@ const SERVICE_TYPES = [
   { value: "Engine Repair", label: "Engine Repair (ซ่อมเครื่อง/เกียร์ ~240 นาที)" },
 ];
 
+const MORNING_SLOTS = ["08:30", "09:30", "10:30", "11:30"];
+const AFTERNOON_SLOTS = ["13:00", "14:00", "15:00", "16:00", "17:00"];
+const ALL_WORKSHOP_SLOTS = [...MORNING_SLOTS, ...AFTERNOON_SLOTS];
+
 interface Appointment {
   AppointmentID: number;
   BookingRef?: string;
@@ -815,17 +819,32 @@ export default function AppointmentsDashboard() {
                 </div>
                 <div>
                   <label htmlFor="edit-appt-time" className="block text-sm font-medium text-slate-700 mb-1">
-                    เวลานัดหมาย (08:30 - 17:30)
+                    เวลานัดหมาย (ช่วงเช้า / ช่วงบ่าย)
                   </label>
-                  <input
+                  <select
                     id="edit-appt-time"
-                    type="time"
-                    min="08:30"
-                    max="17:30"
                     value={editTime}
                     onChange={(e) => setEditTime(e.target.value)}
                     className="w-full border border-slate-300 rounded-lg px-3 py-2 text-base sm:text-sm text-slate-900 focus:outline-none focus:border-blue-600"
-                  />
+                  >
+                    {editTime && !ALL_WORKSHOP_SLOTS.includes(editTime) && (
+                      <option value={editTime}>{editTime} น. (เวลาเดิม)</option>
+                    )}
+                    <optgroup label="☀️ ช่วงเช้า (08:30 – 11:30 น.)">
+                      {MORNING_SLOTS.map((t) => (
+                        <option key={t} value={t}>
+                          {t} น. (ช่วงเช้า)
+                        </option>
+                      ))}
+                    </optgroup>
+                    <optgroup label="🌤️ ช่วงบ่าย (13:00 – 17:00 น.)">
+                      {AFTERNOON_SLOTS.map((t) => (
+                        <option key={t} value={t}>
+                          {t} น. (ช่วงบ่าย)
+                        </option>
+                      ))}
+                    </optgroup>
+                  </select>
                 </div>
               </div>
 
@@ -1050,18 +1069,30 @@ export default function AppointmentsDashboard() {
                 </div>
                 <div>
                   <label htmlFor="walkin-time" className="block text-sm font-medium text-slate-700 mb-1">
-                    เวลา (08:30-17:30) *
+                    เวลา (ช่วงเช้า / ช่วงบ่าย) *
                   </label>
-                  <input
+                  <select
                     id="walkin-time"
                     required
-                    type="time"
-                    min="08:30"
-                    max="17:30"
                     value={walkInData.AppointmentTime}
                     onChange={(e) => setWalkInData({ ...walkInData, AppointmentTime: e.target.value })}
                     className="w-full border border-slate-300 rounded-lg px-3 py-2 text-base sm:text-sm text-slate-900 focus:outline-none focus:border-blue-600"
-                  />
+                  >
+                    <optgroup label="☀️ ช่วงเช้า (08:30 – 11:30 น.)">
+                      {MORNING_SLOTS.map((t) => (
+                        <option key={t} value={t}>
+                          {t} น. (ช่วงเช้า)
+                        </option>
+                      ))}
+                    </optgroup>
+                    <optgroup label="🌤️ ช่วงบ่าย (13:00 – 17:00 น.)">
+                      {AFTERNOON_SLOTS.map((t) => (
+                        <option key={t} value={t}>
+                          {t} น. (ช่วงบ่าย)
+                        </option>
+                      ))}
+                    </optgroup>
+                  </select>
                 </div>
                 <div>
                   <label htmlFor="walkin-mileage" className="block text-sm font-medium text-slate-700 mb-1">

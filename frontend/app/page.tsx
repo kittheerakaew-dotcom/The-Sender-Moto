@@ -24,6 +24,77 @@ const SERVICE_DURATION_LABEL: Record<string, string> = {
   "Diagnostics": "ตรวจเช็กระบบไฟฟ้า (ประมาณ 60 นาที)",
 };
 
+const MORNING_TIME_SLOTS = [
+  { time: "08:30", label: "08:30 น." },
+  { time: "09:30", label: "09:30 น." },
+  { time: "10:30", label: "10:30 น." },
+  { time: "11:30", label: "11:30 น." },
+];
+
+const AFTERNOON_TIME_SLOTS = [
+  { time: "13:00", label: "13:00 น." },
+  { time: "14:00", label: "14:00 น." },
+  { time: "15:00", label: "15:00 น." },
+  { time: "16:00", label: "16:00 น." },
+  { time: "17:00", label: "17:00 น." },
+];
+
+/**
+ * ป้องกันคำภาษาไทยตกบรรทัดกลางคำบนหน้าจอมือถือ (เช่น "เช็กระยะ" ไม่ให้ถูกตัดเป็น "เช็กระ" + "ยะ")
+ * โดยใช้ Unicode Word Joiner (\u2060) ยึดพยางค์ในคำเดียวกัน และ Zero-Width Space (\u200B) คั่นระหว่างคำ
+ */
+function th(text: string): string {
+  const rules: Array<[RegExp, string]> = [
+    [/เช็กระยะ/g, "\u200Bเช็ก\u2060ระ\u2060ยะ\u200B"],
+    [/ระยะเซอร์วิส/g, "\u200Bระ\u2060ยะ\u2060เซอร์\u2060วิส\u200B"],
+    [/ตามระยะ/g, "\u200Bตาม\u2060ระ\u2060ยะ\u200B"],
+    [/ระยะเวลา/g, "\u200Bระ\u2060ยะ\u2060เว\u2060ลา\u200B"],
+    [/ระยะ/g, "ระ\u2060ยะ"],
+    [/ตรวจเช็ก/g, "\u200Bตรวจ\u2060เช็ก\u200B"],
+    [/บำรุงรักษา/g, "\u200Bบำ\u2060รุง\u2060รัก\u2060ษา\u200B"],
+    [/ซ่อมบำรุง/g, "\u200Bซ่อม\u2060บำ\u2060รุง\u200B"],
+    [/เครื่องยนต์/g, "\u200Bเครื่อง\u2060ยนต์\u200B"],
+    [/รถยนต์ยุโรป/g, "\u200Bรถ\u2060ยนต์\u2060ยุ\u2060โรป\u200B"],
+    [/รถยุโรป/g, "\u200Bรถ\u2060ยุ\u2060โรป\u200B"],
+    [/ยุโรป/g, "ยุ\u2060โรป"],
+    [/ช่วงล่าง/g, "\u200Bช่วง\u2060ล่าง\u200B"],
+    [/ถุงลม/g, "\u200Bถุง\u2060ลม\u200B"],
+    [/วิเคราะห์/g, "\u200Bวิ\u2060เคราะห์\u200B"],
+    [/ระบบไฟฟ้า/g, "\u200Bระ\u2060บบ\u2060ไฟ\u2060ฟ้า\u200B"],
+    [/ไฟฟ้า/g, "ไฟ\u2060ฟ้า"],
+    [/มาตรฐาน/g, "\u200Bมาตร\u2060ฐาน\u200B"],
+    [/วิศวกรรม/g, "\u200Bวิศว\u2060กรรม\u200B"],
+    [/อะไหล่/g, "\u200Bอะ\u2060ไหล่\u200B"],
+    [/ออนไลน์/g, "\u200Bออน\u2060ไลน์\u200B"],
+    [/นัดหมาย/g, "\u200Bนัด\u2060หมาย\u200B"],
+    [/ใบเสนอราคา/g, "\u200Bใบ\u2060เสนอ\u2060รา\u2060คา\u200B"],
+    [/ประเมินราคา/g, "\u200Bประ\u2060เมิน\u2060รา\u2060คา\u200B"],
+    [/รับประกัน/g, "\u200Bรับ\u2060ประ\u2060กัน\u200B"],
+    [/สังเคราะห์/g, "\u200Bสัง\u2060เคราะห์\u200B"],
+    [/อัตโนมัติ/g, "\u200Bอัต\u2060โน\u2060มัติ\u200B"],
+    [/เฉพาะทาง/g, "\u200Bเฉพาะ\u2060ทาง\u200B"],
+    [/ครบวงจร/g, "\u200Bครบ\u2060วง\u2060จร\u200B"],
+    [/ตามกำหนด/g, "\u200Bตาม\u2060กำ\u2060หนด\u200B"],
+    [/ศูนย์บริการ/g, "\u200Bศูนย์\u2060บริ\u2060การ\u200B"],
+    [/เลื่อนนัด/g, "\u200Bเลื่อน\u2060นัด\u200B"],
+    [/ตรวจสอบสถานะ/g, "\u200Bตรวจ\u2060สอบ\u2060สถา\u2060นะ\u200B"],
+    [/ตรวจสอบ/g, "\u200Bตรวจ\u2060สอบ\u200B"],
+    [/เปลี่ยนถ่าย/g, "\u200Bเปลี่ยน\u2060ถ่าย\u200B"],
+    [/น้ำมันเครื่อง/g, "\u200Bน้ำ\u2060มัน\u2060เครื่อง\u200B"],
+    [/สมรรถนะ/g, "\u200Bสมรรถ\u2060นะ\u200B"],
+    [/พวงมาลัย/g, "\u200Bพวง\u2060มา\u2060ลัย\u200B"],
+    [/โทรศัพท์/g, "\u200Bโทร\u2060ศัพท์\u200B"],
+    [/ทะเบียนรถ/g, "\u200Bทะ\u2060เบียน\u2060รถ\u200B"],
+    [/ความสมบูรณ์/g, "\u200Bความ\u2060สม\u2060บูรณ์\u200B"],
+    [/ความปลอดภัย/g, "\u200Bความ\u2060ปลอด\u2060ภัย\u200B"],
+  ];
+  let out = text;
+  for (const [pattern, replacement] of rules) {
+    out = out.replace(pattern, replacement);
+  }
+  return out;
+}
+
 interface ShowcaseSlide {
   brand: string;
   title: string;
@@ -909,63 +980,63 @@ export default function LandingPage() {
         {/* 1. Hero Section พร้อมภาพสไลด์รถหรูแบบล็อกความสูงคงที่ (ลูกศรตรงกันทุกภาพ 100% บนทุกอุปกรณ์) */}
         <header className="relative overflow-hidden bg-[radial-gradient(ellipse_at_top_right,#1e293b_0%,#0b0f17_65%)] border-b border-slate-800/80">
           <div className="max-w-7xl mx-auto px-4 sm:px-6 md:px-10 py-8 sm:py-12 md:py-16 lg:py-20">
-            <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 lg:gap-12 items-center">
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-7 sm:gap-8 lg:gap-12 items-center">
               
               {/* คอลัมน์ซ้าย: ข้อความหลักที่จัดวรรคตอนภาษาไทยให้อ่านง่ายบนทุกขนาดจอ */}
-              <div className="lg:col-span-6 text-left space-y-5 sm:space-y-6">
-                <div className="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full border border-blue-500/30 bg-blue-950/40 text-blue-400 text-xs sm:text-sm font-semibold">
+              <div className="lg:col-span-6 text-left space-y-4 sm:space-y-6">
+                <div className="inline-flex items-center gap-2 px-3 sm:px-3.5 py-1.5 rounded-full border border-blue-500/30 bg-blue-950/40 text-blue-400 text-xs sm:text-sm font-semibold max-w-full">
                   <span className="w-2 h-2 rounded-full bg-blue-500 shrink-0" />
-                  <span className="truncate">The Sender Moto &bull; อู่ซ่อมรถยุโรปเฉพาะทาง</span>
+                  <span className="truncate">{th("The Sender Moto • อู่ซ่อมรถยุโรปเฉพาะทาง")}</span>
                 </div>
 
-                <h1 className="text-2xl sm:text-4xl xl:text-[44px] font-extrabold leading-[1.38] text-white">
-                  ศูนย์บริการและอู่ซ่อมรถยุโรป
+                <h1 className="text-[24px] sm:text-4xl xl:text-[44px] font-extrabold leading-[1.42] text-white">
+                  {th("ศูนย์บริการและอู่ซ่อมรถยุโรป")}
                   <span className="block mt-1 sm:mt-1.5 text-transparent bg-clip-text bg-linear-to-r from-blue-300 via-blue-400 to-blue-500">
-                    มาตรฐานวิศวกรรมที่คุณวางใจ
+                    {th("มาตรฐานวิศวกรรมที่คุณวางใจ")}
                   </span>
                 </h1>
 
-                <p className="text-sm sm:text-base md:text-lg text-slate-300 leading-[1.8] max-w-xl">
-                  ดูแลรถยนต์ยุโรปครบวงจร ทั้งเช็กระยะตามกำหนด วิเคราะห์ระบบไฟฟ้าด้วยเครื่องสแกนเฉพาะทาง ซ่อมเครื่องยนต์ เกียร์ และช่วงล่างถุงลม{" "}
+                <p className="text-sm sm:text-base md:text-lg text-slate-300 leading-[1.85] max-w-xl">
+                  {th("ดูแลรถยนต์ยุโรปครบวงจร ทั้งเช็กระยะตามกำหนด วิเคราะห์ระบบไฟฟ้าด้วยเครื่องสแกนเฉพาะทาง ซ่อมเครื่องยนต์ เกียร์ และช่วงล่างถุงลม")}{" "}
                   <strong className="text-white font-semibold">
-                    ตรวจเช็กและแจ้งใบเสนอราคาให้ท่านอนุมัติก่อนเริ่มซ่อมทุกคันครับ
+                    {th("ตรวจเช็กและแจ้งใบเสนอราคาให้ท่านอนุมัติก่อนเริ่มซ่อมทุกคันครับ")}
                   </strong>
                 </p>
 
-                <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3 pt-1">
+                <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2.5 sm:gap-3 pt-1">
                   <button
                     type="button"
                     onClick={openBookingModal}
-                    className="min-h-12 px-6 sm:px-7 py-3.5 bg-blue-600 hover:bg-blue-500 text-white font-bold rounded-xl text-sm sm:text-base transition-all shadow-[0_0_28px_rgba(37,99,235,0.45)] text-center whitespace-nowrap"
+                    className="min-h-12 px-5 sm:px-7 py-3.5 bg-blue-600 hover:bg-blue-500 text-white font-bold rounded-xl text-sm sm:text-base transition-all shadow-[0_0_28px_rgba(37,99,235,0.45)] text-center whitespace-nowrap"
                   >
-                    จองคิวเข้ารับบริการออนไลน์
+                    {th("จองคิวเข้ารับบริการออนไลน์")}
                   </button>
                   <button
                     type="button"
                     onClick={() => openLookupModal()}
                     className="min-h-12 px-5 sm:px-6 py-3.5 border border-slate-700 hover:border-blue-500/60 bg-slate-900/90 text-slate-100 font-semibold rounded-xl text-sm sm:text-base transition-colors text-center whitespace-nowrap"
                   >
-                    ตรวจสอบสถานะ / เลื่อนนัด
+                    {th("ตรวจสอบสถานะ / เลื่อนนัด")}
                   </button>
                 </div>
 
                 {/* ตัวเลขสรุปความเชื่อมั่น (2 คอลัมน์บนมือถือ, 4 คอลัมน์บนแท็บเล็ตและคอม) */}
                 <div className="pt-2 sm:pt-4 grid grid-cols-2 sm:grid-cols-4 gap-2.5 sm:gap-3">
                   <div className="bg-slate-900/70 border border-slate-800/90 rounded-xl p-3 sm:p-3.5">
-                    <div className="text-lg sm:text-xl font-extrabold text-white">8 แบรนด์</div>
-                    <div className="text-xs text-slate-400 mt-0.5">รถยุโรปชั้นนำ</div>
+                    <div className="text-base sm:text-xl font-extrabold text-white">8 แบรนด์</div>
+                    <div className="text-xs text-slate-400 mt-0.5">{th("รถยุโรปชั้นนำ")}</div>
                   </div>
                   <div className="bg-slate-900/70 border border-slate-800/90 rounded-xl p-3 sm:p-3.5">
-                    <div className="text-lg sm:text-xl font-extrabold text-blue-400">100%</div>
-                    <div className="text-xs text-slate-400 mt-0.5">แจ้งราคาก่อนซ่อม</div>
+                    <div className="text-base sm:text-xl font-extrabold text-blue-400">100%</div>
+                    <div className="text-xs text-slate-400 mt-0.5">{th("แจ้งราคาก่อนซ่อม")}</div>
                   </div>
                   <div className="bg-slate-900/70 border border-slate-800/90 rounded-xl p-3 sm:p-3.5">
-                    <div className="text-lg sm:text-xl font-extrabold text-white">OEM / แท้</div>
-                    <div className="text-xs text-slate-400 mt-0.5">อะไหล่ตรงสเปก</div>
+                    <div className="text-base sm:text-xl font-extrabold text-white">OEM / แท้</div>
+                    <div className="text-xs text-slate-400 mt-0.5">{th("อะไหล่ตรงสเปก")}</div>
                   </div>
                   <div className="bg-slate-900/70 border border-slate-800/90 rounded-xl p-3 sm:p-3.5">
-                    <div className="text-lg sm:text-xl font-extrabold text-emerald-400">24 ชม.</div>
-                    <div className="text-xs text-slate-400 mt-0.5">จองและเช็กคิวออนไลน์</div>
+                    <div className="text-base sm:text-xl font-extrabold text-emerald-400">24 ชม.</div>
+                    <div className="text-xs text-slate-400 mt-0.5">{th("จองและเช็กคิวออนไลน์")}</div>
                   </div>
                 </div>
               </div>
@@ -978,7 +1049,7 @@ export default function LandingPage() {
               >
                 <div className="rounded-2xl sm:rounded-3xl overflow-hidden border border-slate-700/80 bg-[#0f1623] shadow-[0_25px_60px_-15px_rgba(2,6,23,0.9)]">
                   {/* กรอบรูปภาพความสูงคงที่ตามขนาดหน้าจอ */}
-                  <div className="relative h-[220px] sm:h-[310px] md:h-[360px] w-full overflow-hidden bg-slate-950 select-none">
+                  <div className="relative h-[215px] sm:h-[310px] md:h-[360px] w-full overflow-hidden bg-slate-950 select-none">
                     {/* eslint-disable-next-line @next/next/no-img-element */}
                     <img
                       src={currentShowcase.image}
@@ -1002,7 +1073,7 @@ export default function LandingPage() {
                       type="button"
                       aria-label="รูปรถก่อนหน้า"
                       onClick={prevSlide}
-                      className="absolute left-2.5 sm:left-4 top-1/2 -translate-y-1/2 z-10 w-10 h-10 sm:w-11 sm:h-11 rounded-full bg-[#0b0f17]/85 hover:bg-blue-600 text-white border border-slate-600/80 flex items-center justify-center transition-colors shadow-lg cursor-pointer"
+                      className="absolute left-2.5 sm:left-4 top-1/2 -translate-y-1/2 z-10 w-9 h-9 sm:w-11 sm:h-11 rounded-full bg-[#0b0f17]/85 hover:bg-blue-600 text-white border border-slate-600/80 flex items-center justify-center transition-colors shadow-lg cursor-pointer"
                     >
                       <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                         <path d="M15 18l-6-6 6-6" />
@@ -1012,7 +1083,7 @@ export default function LandingPage() {
                       type="button"
                       aria-label="รูปรถถัดไป"
                       onClick={nextSlide}
-                      className="absolute right-2.5 sm:right-4 top-1/2 -translate-y-1/2 z-10 w-10 h-10 sm:w-11 sm:h-11 rounded-full bg-[#0b0f17]/85 hover:bg-blue-600 text-white border border-slate-600/80 flex items-center justify-center transition-colors shadow-lg cursor-pointer"
+                      className="absolute right-2.5 sm:right-4 top-1/2 -translate-y-1/2 z-10 w-9 h-9 sm:w-11 sm:h-11 rounded-full bg-[#0b0f17]/85 hover:bg-blue-600 text-white border border-slate-600/80 flex items-center justify-center transition-colors shadow-lg cursor-pointer"
                     >
                       <svg className="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                         <path d="M9 18l6-6-6-6" />
@@ -1039,21 +1110,21 @@ export default function LandingPage() {
                             currentShowcase.recommendedService
                           )
                         }
-                        className="w-full sm:w-auto min-h-10 px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs sm:text-sm font-bold transition-colors shrink-0 whitespace-nowrap text-center"
+                        className="w-full sm:w-auto min-h-10 px-4 py-2.5 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs sm:text-sm font-bold transition-colors shrink-0 whitespace-nowrap text-center"
                       >
                         จองคิวซ่อม {currentShowcase.brand} &rarr;
                       </button>
                     </div>
 
-                    {/* ปุ่มเลือกแบรนด์ใต้ภาพ ล็อกให้อยู่ในแถวเดียวเสมอ (เลื่อนซ้าย-ขวาได้บนจอมือถือเล็ก) */}
-                    <div className="flex items-center justify-between gap-2 mt-4 pt-3.5 border-t border-slate-800/80">
-                      <div className="flex items-center gap-1.5 overflow-x-auto max-w-full pb-1">
+                    {/* ปุ่มเลือกแบรนด์ใต้ภาพ จัดวางเป็นปุ่มกดง่าย ไม่ซ่อนสกรอลบาร์บนมือถือ */}
+                    <div className="flex items-center justify-between gap-2 mt-3.5 pt-3 border-t border-slate-800/80">
+                      <div className="flex flex-wrap items-center gap-1.5">
                         {LUXURY_SHOWCASE_SLIDES.map((s, idx) => (
                           <button
                             key={s.brand}
                             type="button"
                             onClick={() => setActiveSlide(idx)}
-                            className={`px-2.5 sm:px-3 py-1 rounded-lg text-xs font-semibold transition-all cursor-pointer whitespace-nowrap shrink-0 ${
+                            className={`px-2.5 py-1 rounded-lg text-[11px] sm:text-xs font-semibold transition-all cursor-pointer whitespace-nowrap ${
                               idx === activeSlide
                                 ? "bg-blue-600 text-white shadow-xs"
                                 : "bg-slate-900 text-slate-400 hover:text-white border border-slate-800"
@@ -1076,28 +1147,28 @@ export default function LandingPage() {
         </header>
 
         {/* 2. รถยุโรปที่รับดูแล (จัดรูปแบบ Grid การ์ดดูง่าย เห็นครบทุกแบรนด์ในหน้าเดียว) */}
-        <section id="showcase" className="max-w-7xl mx-auto px-5 sm:px-6 md:px-10 py-20 border-b border-slate-900">
-          <div className="text-center max-w-3xl mx-auto mb-12">
+        <section id="showcase" className="max-w-7xl mx-auto px-4 sm:px-6 md:px-10 py-12 sm:py-16 md:py-20 border-b border-slate-900">
+          <div className="text-center max-w-3xl mx-auto mb-8 sm:mb-12">
             <p className="text-xs uppercase tracking-widest text-blue-400 font-semibold mb-2">
               European Marque Specialists
             </p>
-            <h2 className="text-2xl md:text-4xl font-bold text-white mb-3">
-              รถยนต์ยุโรปที่เราเชี่ยวชาญเป็นพิเศษ
+            <h2 className="text-[22px] sm:text-3xl md:text-4xl font-bold text-white mb-2.5 leading-[1.4]">
+              {th("รถยนต์ยุโรปที่เราเชี่ยวชาญเป็นพิเศษ")}
             </h2>
-            <p className="text-sm md:text-base text-slate-400">
-              คัดสรรเครื่องมือวิเคราะห์ระบบไฟฟ้าตรงรุ่นและอะไหล่มาตรฐานสำหรับรถยุโรปแต่ละแบรนด์ สามารถกดปุ่มเลือกแบรนด์รถของท่านเพื่อจองคิวได้ทันทีครับ
+            <p className="text-sm md:text-base text-slate-400 leading-[1.8]">
+              {th("คัดสรรเครื่องมือวิเคราะห์ระบบไฟฟ้าตรงรุ่นและอะไหล่มาตรฐานสำหรับรถยุโรปแต่ละแบรนด์ สามารถกดปุ่มเลือกแบรนด์รถของท่านเพื่อจองคิวได้ทันทีครับ")}
             </p>
           </div>
 
           {/* ตารางการ์ดรถยุโรป 5 กลุ่มหลัก ดูง่าย สบายตา */}
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 sm:gap-6">
             {LUXURY_SHOWCASE_SLIDES.map((item) => (
               <div
                 key={item.brand}
                 className="bg-slate-900/85 border border-slate-800 hover:border-blue-500/50 rounded-2xl overflow-hidden flex flex-col justify-between transition-all shadow-lg"
               >
                 <div>
-                  <div className="relative h-48 w-full overflow-hidden bg-slate-950">
+                  <div className="relative h-44 sm:h-48 w-full overflow-hidden bg-slate-950">
                     {/* eslint-disable-next-line @next/next/no-img-element */}
                     <img
                       src={item.image}
@@ -1113,53 +1184,53 @@ export default function LandingPage() {
                     </span>
                   </div>
 
-                  <div className="p-6 space-y-3">
-                    <h3 className="text-lg font-bold text-white">{item.title}</h3>
-                    <p className="text-xs text-slate-400">
+                  <div className="p-4 sm:p-6 space-y-2.5 sm:space-y-3">
+                    <h3 className="text-base sm:text-lg font-bold text-white">{item.title}</h3>
+                    <p className="text-xs text-slate-400 leading-relaxed">
                       <strong className="text-slate-200">รุ่นยอดนิยม:</strong> {item.popularModels}
                     </p>
-                    <ul className="space-y-2 pt-2 border-t border-slate-800/80 text-xs sm:text-sm text-slate-300">
+                    <ul className="space-y-2 pt-2 border-t border-slate-800/80 text-xs sm:text-sm text-slate-300 leading-[1.75]">
                       {item.highlights.map((h, i) => (
                         <li key={i} className="flex items-start gap-2">
-                          <span className="text-blue-400 font-bold mt-0.5">&#10003;</span>
-                          <span>{h}</span>
+                          <span className="text-blue-400 font-bold mt-0.5 shrink-0">&#10003;</span>
+                          <span>{th(h)}</span>
                         </li>
                       ))}
                     </ul>
                   </div>
                 </div>
 
-                <div className="p-6 pt-0">
+                <div className="p-4 sm:p-6 pt-0">
                   <button
                     type="button"
                     onClick={() => openBookingModalWithPreset(item.brand, item.recommendedService)}
                     className="w-full min-h-11 py-2.5 px-4 bg-blue-600/15 hover:bg-blue-600 border border-blue-500/40 text-blue-300 hover:text-white font-bold rounded-xl text-xs sm:text-sm transition-colors"
                   >
-                    นัดหมายซ่อม {item.brand} &rarr;
+                    {th(`นัดหมายซ่อม ${item.brand}`)} &rarr;
                   </button>
                 </div>
               </div>
             ))}
 
             {/* การ์ดที่ 6: แบรนด์ยุโรปอื่นๆ ที่รับดูแลครบวงจร */}
-            <div className="bg-linear-to-br from-slate-900 to-[#0f172a] border border-slate-800 rounded-2xl p-6 flex flex-col justify-between shadow-lg">
-              <div className="space-y-4">
+            <div className="bg-linear-to-br from-slate-900 to-[#0f172a] border border-slate-800 rounded-2xl p-5 sm:p-6 flex flex-col justify-between shadow-lg">
+              <div className="space-y-3.5 sm:space-y-4">
                 <span className="inline-block px-3 py-1 rounded-full bg-blue-950/60 border border-blue-500/30 text-blue-400 text-xs font-bold">
                   All European Marques
                 </span>
-                <h3 className="text-lg font-bold text-white">
-                  ครอบคลุมรถยนต์ยุโรปชั้นนำทุกรุ่น
+                <h3 className="text-base sm:text-lg font-bold text-white">
+                  {th("ครอบคลุมรถยนต์ยุโรปชั้นนำทุกรุ่น")}
                 </h3>
-                <p className="text-sm text-slate-300 leading-relaxed">
-                  ไม่ว่าจะเป็นรถยุโรปเครื่องยนต์เบนซิน ดีเซลเทอร์โบ หรือ Plug-in Hybrid สามารถเลือกแบรนด์รถของท่านเพื่อจองคิวตรวจเช็กได้ทันทีครับ
+                <p className="text-xs sm:text-sm text-slate-300 leading-[1.8]">
+                  {th("ไม่ว่าจะเป็นรถยุโรปเครื่องยนต์เบนซิน ดีเซลเทอร์โบ หรือ Plug-in Hybrid สามารถเลือกแบรนด์รถของท่านเพื่อจองคิวตรวจเช็กได้ทันทีครับ")}
                 </p>
-                <div className="flex flex-wrap gap-2 pt-2">
+                <div className="flex flex-wrap gap-2 pt-1">
                   {EUROPEAN_BRANDS.map((brand) => (
                     <button
                       key={brand}
                       type="button"
                       onClick={() => openBookingModalWithPreset(brand)}
-                      className="px-3.5 py-1.5 rounded-lg bg-[#0b0f17] border border-slate-700 hover:border-blue-500 text-slate-200 hover:text-blue-400 text-xs font-semibold transition-colors"
+                      className="px-3 py-1.5 rounded-lg bg-[#0b0f17] border border-slate-700 hover:border-blue-500 text-slate-200 hover:text-blue-400 text-xs font-semibold transition-colors"
                     >
                       {brand}
                     </button>
@@ -1167,7 +1238,7 @@ export default function LandingPage() {
                 </div>
               </div>
 
-              <div className="pt-6 mt-6 border-t border-slate-800 space-y-3">
+              <div className="pt-5 mt-5 border-t border-slate-800 space-y-3">
                 <button
                   type="button"
                   onClick={openBookingModal}
@@ -1176,7 +1247,7 @@ export default function LandingPage() {
                   เปิดแบบฟอร์มจองคิวซ่อม
                 </button>
                 <p className="text-[11px] text-slate-400 leading-relaxed">
-                  หมายเหตุ: The Sender Moto เป็นอู่ซ่อมรถยุโรปเฉพาะทางอิสระ (Independent Specialist Workshop) มิใช่ตัวแทนจำหน่ายหรือศูนย์บริการอย่างเป็นทางการของแบรนด์รถยนต์ข้างต้นครับ
+                  {th("หมายเหตุ: The Sender Moto เป็นอู่ซ่อมรถยุโรปเฉพาะทางอิสระ (Independent Specialist Workshop) มิใช่ตัวแทนจำหน่ายหรือศูนย์บริการอย่างเป็นทางการของแบรนด์รถยนต์ข้างต้นครับ")}
                 </p>
               </div>
             </div>
@@ -1184,61 +1255,63 @@ export default function LandingPage() {
         </section>
 
         {/* 3. บริการหลักของเรา (Comprehensive Services Section) */}
-        <section id="services" className="max-w-7xl mx-auto px-5 sm:px-6 md:px-12 py-20">
-          <div className="text-center mb-14">
+        <section id="services" className="max-w-7xl mx-auto px-4 sm:px-6 md:px-12 py-12 sm:py-16 md:py-20">
+          <div className="text-center mb-9 sm:mb-14">
             <p className="text-xs uppercase tracking-widest text-blue-400 font-semibold mb-2">
               Our Specialized Services
             </p>
-            <h2 className="text-2xl md:text-4xl font-bold text-white mb-3">
+            <h2 className="text-[22px] sm:text-3xl md:text-4xl font-bold text-white mb-2.5 leading-[1.4]">
               บริการหลักของ The Sender Moto
             </h2>
-            <p className="text-slate-400 max-w-2xl mx-auto text-sm md:text-base">
-              ครอบคลุมตั้งแต่งานเช็กระยะตามตารางบำรุงรักษา ไปจนถึงงานวิเคราะห์ระบบไฟฟ้า เครื่องยนต์ และช่วงล่างซับซ้อนของรถยุโรปครับ
+            <p className="text-slate-400 max-w-2xl mx-auto text-sm md:text-base leading-[1.8]">
+              {th("ครอบคลุมตั้งแต่งานเช็กระยะตามตารางบำรุงรักษา ไปจนถึงงานวิเคราะห์ระบบไฟฟ้า เครื่องยนต์ และช่วงล่างซับซ้อนของรถยุโรปครับ")}
             </p>
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 sm:gap-6">
             {SERVICE_CARDS.map((srv) => (
               <div
                 key={srv.code}
-                className="bg-slate-900/80 border border-slate-800 hover:border-blue-500/50 rounded-3xl p-6 sm:p-8 flex flex-col justify-between transition-all shadow-lg"
+                className="bg-slate-900/80 border border-slate-800 hover:border-blue-500/50 rounded-2xl sm:rounded-3xl p-5 sm:p-8 flex flex-col justify-between transition-all shadow-lg"
               >
                 <div>
-                  <div className="flex justify-between items-center mb-4">
+                  <div className="flex flex-wrap justify-between items-center gap-2 mb-3.5">
                     <span className="text-blue-400 text-xs font-bold uppercase tracking-widest">
                       {srv.code} / {srv.tag}
                     </span>
-                    <span className="px-3 py-1 rounded-full bg-[#0b0f17] border border-slate-800 text-xs text-slate-300 font-medium">
+                    <span className="px-3 py-1 rounded-full bg-[#0b0f17] border border-slate-800 text-xs text-slate-300 font-medium whitespace-nowrap">
                       เวลาประเมิน: {srv.duration}
                     </span>
                   </div>
-                  <h3 className="text-xl font-bold text-white mb-2">{srv.title}</h3>
-                  <p className="text-sm text-slate-300 leading-relaxed mb-5">
-                    {srv.description}
+                  <h3 className="text-lg sm:text-xl font-bold text-white mb-2 leading-[1.45]">
+                    {th(srv.title)}
+                  </h3>
+                  <p className="text-xs sm:text-sm text-slate-300 leading-[1.8] mb-4 sm:mb-5">
+                    {th(srv.description)}
                   </p>
-                  <div className="bg-[#0b0f17] border border-slate-800/90 rounded-2xl p-4 space-y-2 mb-6">
+                  <div className="bg-[#0b0f17] border border-slate-800/90 rounded-2xl p-3.5 sm:p-4 space-y-2 mb-5 sm:mb-6">
                     <div className="text-xs font-semibold text-slate-400">
-                      ขอบเขตการตรวจเช็กและปฏิบัติงาน:
+                      {th("ขอบเขตการตรวจเช็กและปฏิบัติงาน:")}
                     </div>
-                    <ul className="space-y-1.5 text-xs sm:text-sm text-slate-300">
+                    <ul className="space-y-1.5 text-xs sm:text-sm text-slate-300 leading-[1.75]">
                       {srv.checklist.map((item, idx) => (
                         <li key={idx} className="flex items-start gap-2">
-                          <span className="text-blue-400 font-bold">&#8226;</span>
-                          <span>{item}</span>
+                          <span className="text-blue-400 font-bold shrink-0">&#8226;</span>
+                          <span>{th(item)}</span>
                         </li>
                       ))}
                     </ul>
                   </div>
                 </div>
 
-                <div className="flex items-center justify-between pt-4 border-t border-slate-800">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-4 border-t border-slate-800">
                   <span className="text-xs text-slate-400">
-                    แจ้งใบเสนอราคาก่อนเริ่มงานซ่อมเสมอ
+                    {th("แจ้งใบเสนอราคาก่อนเริ่มงานซ่อมเสมอ")}
                   </span>
                   <button
                     type="button"
                     onClick={() => openBookingModalWithPreset(undefined, srv.serviceKey)}
-                    className="min-h-11 px-5 py-2 bg-blue-600 hover:bg-blue-500 text-white text-xs font-bold rounded-xl transition-colors"
+                    className="w-full sm:w-auto min-h-11 px-5 py-2.5 bg-blue-600 hover:bg-blue-500 text-white text-xs sm:text-sm font-bold rounded-xl transition-colors text-center"
                   >
                     เลือกจองบริการนี้ &rarr;
                   </button>
@@ -1249,54 +1322,54 @@ export default function LandingPage() {
         </section>
 
         {/* 4. ขั้นตอนการเข้ารับบริการ 4 ขั้นตอน (How It Works) */}
-        <section id="process" className="bg-slate-900/40 border-y border-slate-800/80 py-20 px-5 sm:px-6 md:px-12">
+        <section id="process" className="bg-slate-900/40 border-y border-slate-800/80 py-12 sm:py-16 md:py-20 px-4 sm:px-6 md:px-12">
           <div className="max-w-7xl mx-auto">
-            <div className="text-center mb-12">
+            <div className="text-center mb-8 sm:mb-12">
               <p className="text-xs uppercase tracking-widest text-blue-400 font-semibold mb-2">
                 Transparent Service Workflow
               </p>
-              <h2 className="text-2xl md:text-4xl font-bold text-white mb-2">
-                ขั้นตอนการเข้ารับบริการที่โปร่งใส ตรวจสอบได้ทุกขั้นตอน
+              <h2 className="text-[22px] sm:text-3xl md:text-4xl font-bold text-white mb-2 leading-[1.4]">
+                {th("ขั้นตอนการเข้ารับบริการที่โปร่งใส ตรวจสอบได้ทุกขั้นตอน")}
               </h2>
-              <p className="text-sm text-slate-400">
-                ลดเวลารอคอยด้วยระบบจัดคิวตามช่องซ่อม (จำกัดสูงสุดไม่เกิน 2 คันต่อช่วงเวลา เพื่อความประณีตสูงสุด) ครับ
+              <p className="text-xs sm:text-sm text-slate-400 leading-[1.8]">
+                {th("ลดเวลารอคอยด้วยระบบจัดคิวตามช่องซ่อม (จำกัดสูงสุดไม่เกิน 2 คันต่อช่วงเวลา เพื่อความประณีตสูงสุด) ครับ")}
               </p>
             </div>
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6 text-sm">
-              <div className="bg-[#0b0f17] border border-slate-800 rounded-2xl p-6 relative">
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 sm:gap-6 text-sm">
+              <div className="bg-[#0b0f17] border border-slate-800 rounded-2xl p-5 sm:p-6 relative">
                 <span className="inline-block px-3 py-1 rounded-full bg-blue-950/60 text-blue-400 font-bold text-xs mb-3">
                   STEP 01
                 </span>
-                <h3 className="font-bold text-white text-lg mb-2">นัดหมายคิวออนไลน์</h3>
-                <p className="text-slate-400 leading-relaxed">
-                  เลือกวัน-เวลาที่สะดวก แนบรูปไฟเตือนหรืออาการรถเบื้องต้น และรับรหัสอ้างอิง (`SM-YYMMDD-XXXX`) ทันทีครับ
+                <h3 className="font-bold text-white text-base sm:text-lg mb-2">{th("นัดหมายคิวออนไลน์")}</h3>
+                <p className="text-slate-400 text-xs sm:text-sm leading-[1.8]">
+                  {th("เลือกวันและช่วงเวลาเช้า/บ่ายที่สะดวก แนบรูปไฟเตือนหรืออาการรถเบื้องต้นได้ทันทีครับ")}
                 </p>
               </div>
-              <div className="bg-[#0b0f17] border border-slate-800 rounded-2xl p-6 relative">
+              <div className="bg-[#0b0f17] border border-slate-800 rounded-2xl p-5 sm:p-6 relative">
                 <span className="inline-block px-3 py-1 rounded-full bg-blue-950/60 text-blue-400 font-bold text-xs mb-3">
                   STEP 02
                 </span>
-                <h3 className="font-bold text-white text-lg mb-2">ตรวจเช็กและเสนอราคา</h3>
-                <p className="text-slate-400 leading-relaxed">
-                  ทีมช่างตรวจสอบอาการจริงด้วยเครื่องวิเคราะห์เฉพาะทาง และแจ้งใบเสนอราคาให้ท่านอนุมัติก่อนเริ่มซ่อมทุกครั้งครับ
+                <h3 className="font-bold text-white text-base sm:text-lg mb-2">{th("ตรวจเช็กและเสนอราคา")}</h3>
+                <p className="text-slate-400 text-xs sm:text-sm leading-[1.8]">
+                  {th("ทีมช่างตรวจสอบอาการจริงด้วยเครื่องวิเคราะห์เฉพาะทาง และแจ้งใบเสนอราคาให้ท่านอนุมัติก่อนเริ่มซ่อมทุกครั้งครับ")}
                 </p>
               </div>
-              <div className="bg-[#0b0f17] border border-slate-800 rounded-2xl p-6 relative">
+              <div className="bg-[#0b0f17] border border-slate-800 rounded-2xl p-5 sm:p-6 relative">
                 <span className="inline-block px-3 py-1 rounded-full bg-blue-950/60 text-blue-400 font-bold text-xs mb-3">
                   STEP 03
                 </span>
-                <h3 className="font-bold text-white text-lg mb-2">ดำเนินการซ่อมบำรุง</h3>
-                <p className="text-slate-400 leading-relaxed">
-                  ซ่อมบำรุงด้วยความประณีต พร้อมอัปเดตสถานะงานซ่อม (`กำลังซ่อม` &rarr; `รถพร้อมรับ`) ให้เช็กออนไลน์ได้ตลอดเวลาครับ
+                <h3 className="font-bold text-white text-base sm:text-lg mb-2">{th("ดำเนินการซ่อมบำรุง")}</h3>
+                <p className="text-slate-400 text-xs sm:text-sm leading-[1.8]">
+                  {th("ซ่อมบำรุงด้วยความประณีต พร้อมอัปเดตสถานะงานซ่อมให้เช็กออนไลน์ด้วยเบอร์โทรศัพท์ได้ตลอดเวลาครับ")}
                 </p>
               </div>
-              <div className="bg-[#0b0f17] border border-slate-800 rounded-2xl p-6 relative">
+              <div className="bg-[#0b0f17] border border-slate-800 rounded-2xl p-5 sm:p-6 relative">
                 <span className="inline-block px-3 py-1 rounded-full bg-blue-950/60 text-blue-400 font-bold text-xs mb-3">
                   STEP 04
                 </span>
-                <h3 className="font-bold text-white text-lg mb-2">ตรวจสอบและส่งมอบรถ</h3>
-                <p className="text-slate-400 leading-relaxed">
-                  ทดสอบความสมบูรณ์ก่อนส่งมอบรถ พร้อมใบสรุปรายการอะไหล่ ใบเสร็จรับเงินชัดเจน และคำแนะนำการดูแลรักษาครับ
+                <h3 className="font-bold text-white text-base sm:text-lg mb-2">{th("ตรวจสอบและส่งมอบรถ")}</h3>
+                <p className="text-slate-400 text-xs sm:text-sm leading-[1.8]">
+                  {th("ทดสอบความสมบูรณ์ก่อนส่งมอบรถ พร้อมใบสรุปรายการอะไหล่ ใบเสร็จรับเงินชัดเจน และคำแนะนำการดูแลรักษาครับ")}
                 </p>
               </div>
             </div>
@@ -1304,23 +1377,23 @@ export default function LandingPage() {
         </section>
 
         {/* 5. มาตรฐานอู่ เครื่องมือ และนโยบายราคาโปร่งใส (Workshop & Standards) */}
-        <section id="workshop" className="max-w-7xl mx-auto px-5 sm:px-6 md:px-12 py-20 space-y-12">
+        <section id="workshop" className="max-w-7xl mx-auto px-4 sm:px-6 md:px-12 py-12 sm:py-16 md:py-20 space-y-8 sm:space-y-12">
           <div className="text-center">
             <p className="text-xs uppercase tracking-widest text-blue-400 font-semibold mb-2">
               Workshop &amp; Service Standards
             </p>
-            <h2 className="text-2xl md:text-4xl font-bold text-white mb-3">
-              มาตรฐานอู่ ทีมช่าง และนโยบายราคาโปร่งใส
+            <h2 className="text-[22px] sm:text-3xl md:text-4xl font-bold text-white mb-2.5 leading-[1.4]">
+              {th("มาตรฐานอู่ ทีมช่าง และนโยบายราคาโปร่งใส")}
             </h2>
-            <p className="text-slate-400 max-w-2xl mx-auto text-sm md:text-base">
-              เราดูแลรถยนต์ยุโรปทุกคันด้วยความระมัดระวัง หุ้มเบาะและพวงมาลัยป้องกันรอยเปื้อนทุกครั้ง และชี้แจงรายการซ่อมตามความเป็นจริงครับ
+            <p className="text-slate-400 max-w-2xl mx-auto text-sm md:text-base leading-[1.8]">
+              {th("เราดูแลรถยนต์ยุโรปทุกคันด้วยความระมัดระวัง หุ้มเบาะและพวงมาลัยป้องกันรอยเปื้อนทุกครั้ง และชี้แจงรายการซ่อมตามความเป็นจริงครับ")}
             </p>
           </div>
 
           {/* ภาพประกอบมาตรฐานการดูแลรักษารถยุโรป + หมายเหตุสำหรับเปลี่ยนเป็นรูปอู่จริง */}
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-            <div className="bg-slate-900 border border-slate-800 rounded-3xl overflow-hidden shadow-lg">
-              <div className="h-60 overflow-hidden bg-slate-950 relative">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 sm:gap-6">
+            <div className="bg-slate-900 border border-slate-800 rounded-2xl sm:rounded-3xl overflow-hidden shadow-lg">
+              <div className="h-48 sm:h-60 overflow-hidden bg-slate-950 relative">
                 {/* eslint-disable-next-line @next/next/no-img-element */}
                 <img
                   src="/cars/workshop-bay.jpg"
@@ -1331,18 +1404,18 @@ export default function LandingPage() {
                   Diagnostic &amp; Service Bay
                 </span>
               </div>
-              <div className="p-6">
-                <h3 className="text-lg font-bold text-white mb-2">
-                  บริเวณช่องซ่อมและเครื่องมือมาตรฐานสำหรับรถยุโรป
+              <div className="p-5 sm:p-6">
+                <h3 className="text-base sm:text-lg font-bold text-white mb-2 leading-[1.45]">
+                  {th("บริเวณช่องซ่อมและเครื่องมือมาตรฐานสำหรับรถยุโรป")}
                 </h3>
-                <p className="text-xs text-slate-400">
+                <p className="text-xs text-slate-400 leading-relaxed">
                   [TODO: ใส่รูปภาพจริงของหน้าอู่ ช่องซ่อม และลิฟต์ยกรถของ The Sender Moto ก่อนเปิดใช้งานจริง]
                 </p>
               </div>
             </div>
 
-            <div className="bg-slate-900 border border-slate-800 rounded-3xl overflow-hidden shadow-lg">
-              <div className="h-60 overflow-hidden bg-slate-950 relative">
+            <div className="bg-slate-900 border border-slate-800 rounded-2xl sm:rounded-3xl overflow-hidden shadow-lg">
+              <div className="h-48 sm:h-60 overflow-hidden bg-slate-950 relative">
                 {/* eslint-disable-next-line @next/next/no-img-element */}
                 <img
                   src="/cars/engine-care.jpg"
@@ -1353,11 +1426,11 @@ export default function LandingPage() {
                   Precision Mechanical Care
                 </span>
               </div>
-              <div className="p-6">
-                <h3 className="text-lg font-bold text-white mb-2">
-                  ทีมช่างผู้เชี่ยวชาญและเครื่องวิเคราะห์ระบบไฟฟ้าเฉพาะทาง
+              <div className="p-5 sm:p-6">
+                <h3 className="text-base sm:text-lg font-bold text-white mb-2 leading-[1.45]">
+                  {th("ทีมช่างผู้เชี่ยวชาญและเครื่องวิเคราะห์ระบบไฟฟ้าเฉพาะทาง")}
                 </h3>
-                <p className="text-xs text-slate-400">
+                <p className="text-xs text-slate-400 leading-relaxed">
                   [TODO: ใส่รูปภาพจริงของทีมช่างขณะปฏิบัติงานและเครื่องวิเคราะห์ระบบไฟฟ้าของ The Sender Moto]
                 </p>
               </div>
@@ -1365,47 +1438,47 @@ export default function LandingPage() {
           </div>
 
           {/* นโยบายราคาโปร่งใส และการรับประกัน */}
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-7">
-              <h3 className="text-lg font-bold text-blue-400 mb-3">
-                นโยบายการประเมินราคาอย่างโปร่งใส (Transparent Pricing)
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 sm:gap-6">
+            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 sm:p-7">
+              <h3 className="text-base sm:text-lg font-bold text-blue-400 mb-3 leading-[1.45]">
+                {th("นโยบายการประเมินราคาอย่างโปร่งใส (Transparent Pricing)")}
               </h3>
-              <ul className="space-y-2.5 text-sm text-slate-300 list-disc list-inside">
-                <li>ตรวจเช็กอาการด้วยเครื่องมือวิเคราะห์และแจ้งสาเหตุที่แท้จริงให้ลูกค้าทราบ</li>
-                <li>แจกแจงราคาค่าอะไหล่และค่าแรงเป็นรายชิ้นอย่างชัดเจนก่อนเริ่มงานซ่อม</li>
-                <li>เริ่มดำเนินการซ่อมเฉพาะเมื่อได้รับความยินยอมจากลูกค้าแล้วเท่านั้นครับ</li>
-                <li>สามารถขอดูอะไหล่เก่าที่ถอดเปลี่ยนทุกชิ้นได้ในวันรับรถครับ</li>
+              <ul className="space-y-2.5 text-xs sm:text-sm text-slate-300 list-disc list-inside leading-[1.75]">
+                <li>{th("ตรวจเช็กอาการด้วยเครื่องมือวิเคราะห์และแจ้งสาเหตุที่แท้จริงให้ลูกค้าทราบ")}</li>
+                <li>{th("แจกแจงราคาค่าอะไหล่และค่าแรงเป็นรายชิ้นอย่างชัดเจนก่อนเริ่มงานซ่อม")}</li>
+                <li>{th("เริ่มดำเนินการซ่อมเฉพาะเมื่อได้รับความยินยอมจากลูกค้าแล้วเท่านั้นครับ")}</li>
+                <li>{th("สามารถขอดูอะไหล่เก่าที่ถอดเปลี่ยนทุกชิ้นได้ในวันรับรถครับ")}</li>
               </ul>
             </div>
 
-            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-7">
-              <h3 className="text-lg font-bold text-blue-400 mb-3">
-                นโยบายอะไหล่และการรับประกันงานซ่อม (Warranty &amp; Policy)
+            <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 sm:p-7">
+              <h3 className="text-base sm:text-lg font-bold text-blue-400 mb-3 leading-[1.45]">
+                {th("นโยบายอะไหล่และการรับประกันงานซ่อม (Warranty & Policy)")}
               </h3>
-              <ul className="space-y-2.5 text-sm text-slate-300 list-disc list-inside">
-                <li>เลือกใช้อะไหล่แท้หรืออะไหล่ OEM มาตรฐานรถยุโรปตามงบประมาณที่ลูกค้าเลือก</li>
-                <li>บันทึกประวัติการซ่อมบำรุงและเลขไมล์ลงในระบบทุกครั้งเพื่อใช้อ้างอิงในรอบถัดไป</li>
-                <li>ออกใบสรุปรายการซ่อมและใบเสร็จรับเงินชัดเจนทุกใบงาน</li>
-                <li>เงื่อนไขการรับประกัน: [TODO: ระบุระยะเวลารับประกันงานซ่อมและอะไหล่จริงของอู่]</li>
+              <ul className="space-y-2.5 text-xs sm:text-sm text-slate-300 list-disc list-inside leading-[1.75]">
+                <li>{th("เลือกใช้อะไหล่แท้หรืออะไหล่ OEM มาตรฐานรถยุโรปตามงบประมาณที่ลูกค้าเลือก")}</li>
+                <li>{th("บันทึกประวัติการซ่อมบำรุงและเลขไมล์ลงในระบบทุกครั้งเพื่อใช้อ้างอิงในรอบถัดไป")}</li>
+                <li>{th("ออกใบสรุปรายการซ่อมและใบเสร็จรับเงินชัดเจนทุกใบงาน")}</li>
+                <li>{th("เงื่อนไขการรับประกัน: [TODO: ระบุระยะเวลารับประกันงานซ่อมและอะไหล่จริงของอู่]")}</li>
               </ul>
             </div>
           </div>
         </section>
 
         {/* 6. เสียงตอบรับจากลูกค้า (Honest Placeholder — No Fake Reviews) */}
-        <section id="reviews" className="bg-slate-900/30 border-y border-slate-800/80 py-16 px-5 sm:px-6 md:px-12">
+        <section id="reviews" className="bg-slate-900/30 border-y border-slate-800/80 py-12 sm:py-16 px-4 sm:px-6 md:px-12">
           <div className="max-w-5xl mx-auto text-center">
             <p className="text-xs uppercase tracking-widest text-blue-400 font-semibold mb-2">
               Customer Feedback
             </p>
-            <h2 className="text-2xl md:text-3xl font-bold text-white mb-4">
+            <h2 className="text-[22px] sm:text-3xl font-bold text-white mb-4 leading-[1.4]">
               เสียงตอบรับจากลูกค้าผู้ใช้บริการจริง
             </h2>
-            <div className="bg-[#0b0f17] border border-dashed border-slate-700 rounded-2xl p-8 max-w-3xl mx-auto">
+            <div className="bg-[#0b0f17] border border-dashed border-slate-700 rounded-2xl p-5 sm:p-8 max-w-3xl mx-auto">
               <p className="text-sm text-slate-300 font-medium mb-2">
                 พื้นที่สำหรับแสดงรีวิวจากลูกค้าจริงของ The Sender Moto
               </p>
-              <p className="text-xs text-slate-400">
+              <p className="text-xs text-slate-400 leading-relaxed">
                 [TODO: ใส่รีวิวจริงจากลูกค้าที่ใช้บริการจริง หรือฝังลิงก์รีวิวจาก Google Maps / Facebook Page ของอู่ — เว้นไว้เพื่อความซื่อสัตย์ ไม่ใช้รีวิวสมมติครับ]
               </p>
             </div>
@@ -1413,16 +1486,16 @@ export default function LandingPage() {
         </section>
 
         {/* 7. คำถามที่พบบ่อยแบบพับเปิด-ปิดได้ (Interactive Accordion FAQ) */}
-        <section id="faq" className="max-w-4xl mx-auto px-5 sm:px-6 py-20">
-          <div className="text-center mb-10">
+        <section id="faq" className="max-w-4xl mx-auto px-4 sm:px-6 py-12 sm:py-16 md:py-20">
+          <div className="text-center mb-8 sm:mb-10">
             <p className="text-xs uppercase tracking-widest text-blue-400 font-semibold mb-2">
               Frequently Asked Questions
             </p>
-            <h2 className="text-2xl md:text-3xl font-bold text-white">
-              คำถามที่พบบ่อยเกี่ยวกับการจองคิวและรับบริการ
+            <h2 className="text-[22px] sm:text-3xl font-bold text-white leading-[1.4]">
+              {th("คำถามที่พบบ่อยเกี่ยวกับการจองคิวและรับบริการ")}
             </h2>
           </div>
-          <div className="space-y-3.5">
+          <div className="space-y-3">
             {FAQ_ITEMS.map((item, idx) => {
               const isOpen = openFaqIndex === idx;
               return (
@@ -1434,18 +1507,18 @@ export default function LandingPage() {
                     type="button"
                     aria-expanded={isOpen}
                     onClick={() => setOpenFaqIndex(isOpen ? null : idx)}
-                    className="w-full min-h-14 px-6 py-4 text-left flex justify-between items-center gap-4 hover:bg-slate-800/50 transition-colors"
+                    className="w-full min-h-14 px-4 sm:px-6 py-3.5 sm:py-4 text-left flex justify-between items-center gap-3 sm:gap-4 hover:bg-slate-800/50 transition-colors"
                   >
-                    <span className="text-base font-bold text-white">
-                      Q: {item.q}
+                    <span className="text-sm sm:text-base font-bold text-white leading-[1.5]">
+                      Q: {th(item.q)}
                     </span>
                     <span className="text-blue-400 font-bold text-xl shrink-0">
                       {isOpen ? "−" : "+"}
                     </span>
                   </button>
                   {isOpen && (
-                    <div className="px-6 pb-5 pt-1 text-sm text-slate-300 leading-relaxed border-t border-slate-800/60">
-                      {item.a}
+                    <div className="px-4 sm:px-6 pb-4 sm:pb-5 pt-2 text-xs sm:text-sm text-slate-300 leading-[1.8] border-t border-slate-800/60">
+                      {th(item.a)}
                     </div>
                   )}
                 </div>
@@ -1455,37 +1528,37 @@ export default function LandingPage() {
         </section>
 
         {/* 8. ติดต่ออู่ เวลาทำการ และแผนที่ (Contact & Location Section) */}
-        <section id="contact" className="max-w-6xl mx-auto px-5 sm:px-6 pb-20">
-          <div className="bg-slate-900 border border-slate-800 rounded-3xl p-6 sm:p-10 grid grid-cols-1 lg:grid-cols-12 gap-8 items-center shadow-2xl">
+        <section id="contact" className="max-w-6xl mx-auto px-4 sm:px-6 pb-14 sm:pb-20">
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl sm:rounded-3xl p-5 sm:p-10 grid grid-cols-1 lg:grid-cols-12 gap-6 sm:gap-8 items-center shadow-2xl">
             <div className="lg:col-span-7 space-y-4">
               <p className="text-xs uppercase tracking-widest text-blue-400 font-semibold">
                 Contact &amp; Location
               </p>
-              <h2 className="text-2xl sm:text-3xl font-bold text-white">
+              <h2 className="text-[22px] sm:text-3xl font-bold text-white leading-[1.4]">
                 ติดต่ออู่ The Sender Moto
               </h2>
-              <p className="text-slate-300 text-sm leading-relaxed">
-                สามารถจองคิวผ่านเว็บไซต์ได้ตลอด 24 ชั่วโมง หรือติดต่อสอบถามอาการรถ ประเมินราคาเบื้องต้น และนัดหมายผ่านช่องทางด้านล่างครับ
+              <p className="text-slate-300 text-xs sm:text-sm leading-[1.8]">
+                {th("สามารถจองคิวผ่านเว็บไซต์ได้ตลอด 24 ชั่วโมง หรือติดต่อสอบถามอาการรถ ประเมินราคาเบื้องต้น และนัดหมายผ่านช่องทางด้านล่างครับ")}
               </p>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-2 text-sm text-slate-200">
-                <div className="bg-[#0b0f17] border border-slate-800 rounded-xl p-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 sm:gap-4 pt-1 text-sm text-slate-200">
+                <div className="bg-[#0b0f17] border border-slate-800 rounded-xl p-3.5 sm:p-4">
                   <span className="text-xs text-slate-400 block mb-1">เวลาทำการ</span>
                   <span className="font-bold text-white">จันทร์–เสาร์ 08:30 – 17:30 น.</span>
                   <span className="text-xs text-slate-500 block mt-0.5">(หยุดวันอาทิตย์)</span>
                 </div>
-                <div className="bg-[#0b0f17] border border-slate-800 rounded-xl p-4">
-                  <span className="text-xs text-slate-400 block mb-1">โทรศัพท์สายตรง</span>
+                <div className="bg-[#0b0f17] border border-slate-800 rounded-xl p-3.5 sm:p-4">
+                  <span className="text-xs text-slate-400 block mb-1">{th("โทรศัพท์สายตรง")}</span>
                   <a href="tel:0808996645" className="font-extrabold text-blue-400 text-lg hover:underline">
                     080-899-6645
                   </a>
                 </div>
-                <div className="bg-[#0b0f17] border border-slate-800 rounded-xl p-4">
+                <div className="bg-[#0b0f17] border border-slate-800 rounded-xl p-3.5 sm:p-4">
                   <span className="text-xs text-slate-400 block mb-1">สถานที่ตั้งอู่</span>
                   <span className="text-xs text-slate-300">
                     [TODO: ใส่ข้อมูลจริง - ที่อยู่อู่ The Sender Moto]
                   </span>
                 </div>
-                <div className="bg-[#0b0f17] border border-slate-800 rounded-xl p-4">
+                <div className="bg-[#0b0f17] border border-slate-800 rounded-xl p-3.5 sm:p-4">
                   <span className="text-xs text-slate-400 block mb-1">LINE Official Account</span>
                   <span className="text-xs text-slate-300">
                     [TODO: ใส่ข้อมูลจริง - @LINE_ID]
@@ -1494,30 +1567,30 @@ export default function LandingPage() {
               </div>
             </div>
 
-            <div className="lg:col-span-5 flex flex-col gap-3.5 bg-[#0b0f17] border border-slate-800 rounded-2xl p-6">
-              <h3 className="text-base font-bold text-white">
-                ต้องการนำรถเข้าตรวจเช็กหรือเช็กระยะ?
+            <div className="lg:col-span-5 flex flex-col gap-3 bg-[#0b0f17] border border-slate-800 rounded-2xl p-5 sm:p-6">
+              <h3 className="text-base font-bold text-white leading-[1.45]">
+                {th("ต้องการนำรถเข้าตรวจเช็กหรือเช็กระยะ?")}
               </h3>
-              <p className="text-xs text-slate-400">
-                เลือกวันและเวลาที่สะดวก ระบบจะล็อกช่องซ่อมไว้ให้ท่านทันทีครับ
+              <p className="text-xs text-slate-400 leading-relaxed">
+                {th("เลือกวันและช่วงเวลาเช้า/บ่ายที่สะดวก ระบบจะล็อกช่องซ่อมไว้ให้ท่านทันทีครับ")}
               </p>
               <button
                 type="button"
                 onClick={openBookingModal}
-                className="w-full min-h-12 py-3.5 bg-blue-600 hover:bg-blue-500 text-white font-bold rounded-xl transition-colors shadow-lg"
+                className="w-full min-h-12 py-3.5 bg-blue-600 hover:bg-blue-500 text-white font-bold rounded-xl transition-colors shadow-lg text-sm sm:text-base"
               >
-                จองคิวซ่อมออนไลน์ทันที
+                {th("จองคิวซ่อมออนไลน์ทันที")}
               </button>
               <button
                 type="button"
                 onClick={() => openLookupModal()}
-                className="w-full min-h-11 py-3 border border-slate-700 hover:border-blue-500 text-slate-200 font-semibold rounded-xl text-sm transition-colors"
+                className="w-full min-h-11 py-3 border border-slate-700 hover:border-blue-500 text-slate-200 font-semibold rounded-xl text-xs sm:text-sm transition-colors"
               >
-                เช็กสถานะคิว / เลื่อนวันนัดหมาย
+                {th("เช็กสถานะคิว / เลื่อนวันนัดหมาย")}
               </button>
               <a
                 href="tel:0808996645"
-                className="w-full min-h-11 py-3 border border-slate-800 bg-slate-900 hover:border-blue-500 text-blue-400 font-semibold rounded-xl text-center text-sm flex items-center justify-center transition-colors"
+                className="w-full min-h-11 py-3 border border-slate-800 bg-slate-900 hover:border-blue-500 text-blue-400 font-semibold rounded-xl text-center text-xs sm:text-sm flex items-center justify-center transition-colors"
               >
                 โทรปรึกษาทีมช่าง: 080-899-6645
               </a>
@@ -1935,7 +2008,7 @@ export default function LandingPage() {
                   <h3 className="text-sm font-semibold text-blue-400 uppercase tracking-wider mb-4 border-b border-slate-800 pb-2">
                     3. นัดหมาย (Appointment)
                   </h3>
-                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                     <div>
                       <label htmlFor="booking-date" className="block text-sm mb-1 text-slate-300">
                         วันที่เข้าซ่อม (จันทร์–เสาร์) *
@@ -1952,32 +2025,6 @@ export default function LandingPage() {
                       />
                       {fieldErrors.AppointmentDate && (
                         <p className="text-xs text-red-400 mt-1">{fieldErrors.AppointmentDate}</p>
-                      )}
-                    </div>
-                    <div>
-                      <label htmlFor="booking-time" className="block text-sm mb-1 text-slate-300">
-                        เวลา (08:30 - 17:30) *
-                      </label>
-                      <input
-                        id="booking-time"
-                        required
-                        type="time"
-                        min="08:30"
-                        max="17:30"
-                        name="AppointmentTime"
-                        value={bookingData.AppointmentTime}
-                        onChange={handleInputChange}
-                        className="w-full bg-slate-800 border border-slate-700 rounded-lg px-4 py-2.5 text-white focus:outline-none focus:border-blue-500 scheme-dark"
-                      />
-                      {fieldErrors.AppointmentTime && (
-                        <p className="text-xs text-red-400 mt-1">{fieldErrors.AppointmentTime}</p>
-                      )}
-                      {slotInfo && bookingData.AppointmentTime && (
-                        <p className={`text-xs mt-1 ${selectedTimeBooked >= slotInfo.maxPerSlot ? "text-red-400" : "text-emerald-400"}`}>
-                          {selectedTimeBooked >= slotInfo.maxPerSlot
-                            ? "ช่วงเวลานี้คิวเต็มแล้ว กรุณาเลือกเวลาอื่นครับ"
-                            : `ช่องซ่อมว่าง ${slotInfo.maxPerSlot - selectedTimeBooked}/${slotInfo.maxPerSlot} ช่อง`}
-                        </p>
                       )}
                     </div>
                     <div>
@@ -1998,6 +2045,131 @@ export default function LandingPage() {
                         ))}
                       </select>
                     </div>
+                  </div>
+
+                  {/* ตัวเลือกเวลาแบบปุ่มกดแยก ช่วงเช้า / ช่วงบ่าย (ไม่ต้องพิมพ์ ไม่ต้องสับสน AM/PM) */}
+                  <div className="mt-4 bg-[#0b0f17] border border-slate-800 rounded-xl p-3.5 sm:p-4 space-y-3.5">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <span className="text-sm font-semibold text-slate-200">
+                        เลือกเวลาที่สะดวก (เวลาทำการอู่ 08:30 – 17:30 น.) *
+                      </span>
+                      {bookingData.AppointmentTime ? (
+                        <span className="px-2.5 py-0.5 rounded-full bg-blue-600/20 border border-blue-500/40 text-blue-300 text-xs font-bold">
+                          เลือกเวลา: {bookingData.AppointmentTime} น.
+                        </span>
+                      ) : (
+                        <span className="text-xs text-slate-400">
+                          แตะเลือกช่วงเวลาด้านล่างได้เลยครับ
+                        </span>
+                      )}
+                    </div>
+
+                    {/* ช่วงเช้า */}
+                    <div>
+                      <div className="text-xs font-semibold text-amber-300/90 mb-2 flex items-center gap-1.5">
+                        <span>☀️ ช่วงเช้า (08:30 – 11:30 น.)</span>
+                      </div>
+                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                        {MORNING_TIME_SLOTS.map((slot) => {
+                          const isSelected = bookingData.AppointmentTime === slot.time;
+                          const booked = slotInfo ? slotInfo.bookedSlots[slot.time] || 0 : 0;
+                          const maxPerSlot = slotInfo ? slotInfo.maxPerSlot : 2;
+                          const isFull = Boolean(slotInfo && booked >= maxPerSlot);
+                          return (
+                            <button
+                              key={slot.time}
+                              type="button"
+                              disabled={isFull}
+                              onClick={() => {
+                                setFieldErrors((prev) => ({ ...prev, AppointmentTime: "" }));
+                                setBookingData((prev) => ({ ...prev, AppointmentTime: slot.time }));
+                              }}
+                              className={`min-h-11 px-3 py-2 rounded-xl border text-center transition-all cursor-pointer flex flex-col items-center justify-center ${
+                                isFull
+                                  ? "bg-slate-900/50 border-slate-800 text-slate-600 cursor-not-allowed opacity-60"
+                                  : isSelected
+                                  ? "bg-blue-600 border-blue-400 text-white font-bold shadow-[0_0_16px_rgba(37,99,235,0.45)]"
+                                  : "bg-slate-800/90 hover:bg-slate-800 border-slate-700 hover:border-blue-500/60 text-slate-200 font-semibold"
+                              }`}
+                            >
+                              <span className="text-xs sm:text-sm">{slot.label}</span>
+                              {slotInfo && (
+                                <span
+                                  className={`text-[10px] mt-0.5 ${
+                                    isFull
+                                      ? "text-red-400 font-semibold"
+                                      : isSelected
+                                      ? "text-blue-100"
+                                      : "text-emerald-400"
+                                  }`}
+                                >
+                                  {isFull ? "คิวเต็ม" : `ว่าง ${maxPerSlot - booked} ช่อง`}
+                                </span>
+                              )}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+
+                    {/* ช่วงบ่าย */}
+                    <div>
+                      <div className="text-xs font-semibold text-sky-300/90 mb-2 flex items-center gap-1.5">
+                        <span>🌤️ ช่วงบ่าย (13:00 – 17:00 น.)</span>
+                      </div>
+                      <div className="grid grid-cols-2 sm:grid-cols-5 gap-2">
+                        {AFTERNOON_TIME_SLOTS.map((slot) => {
+                          const isSelected = bookingData.AppointmentTime === slot.time;
+                          const booked = slotInfo ? slotInfo.bookedSlots[slot.time] || 0 : 0;
+                          const maxPerSlot = slotInfo ? slotInfo.maxPerSlot : 2;
+                          const isFull = Boolean(slotInfo && booked >= maxPerSlot);
+                          return (
+                            <button
+                              key={slot.time}
+                              type="button"
+                              disabled={isFull}
+                              onClick={() => {
+                                setFieldErrors((prev) => ({ ...prev, AppointmentTime: "" }));
+                                setBookingData((prev) => ({ ...prev, AppointmentTime: slot.time }));
+                              }}
+                              className={`min-h-11 px-3 py-2 rounded-xl border text-center transition-all cursor-pointer flex flex-col items-center justify-center ${
+                                isFull
+                                  ? "bg-slate-900/50 border-slate-800 text-slate-600 cursor-not-allowed opacity-60"
+                                  : isSelected
+                                  ? "bg-blue-600 border-blue-400 text-white font-bold shadow-[0_0_16px_rgba(37,99,235,0.45)]"
+                                  : "bg-slate-800/90 hover:bg-slate-800 border-slate-700 hover:border-blue-500/60 text-slate-200 font-semibold"
+                              }`}
+                            >
+                              <span className="text-xs sm:text-sm">{slot.label}</span>
+                              {slotInfo && (
+                                <span
+                                  className={`text-[10px] mt-0.5 ${
+                                    isFull
+                                      ? "text-red-400 font-semibold"
+                                      : isSelected
+                                      ? "text-blue-100"
+                                      : "text-emerald-400"
+                                  }`}
+                                >
+                                  {isFull ? "คิวเต็ม" : `ว่าง ${maxPerSlot - booked} ช่อง`}
+                                </span>
+                              )}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+
+                    {fieldErrors.AppointmentTime && (
+                      <p className="text-xs text-red-400">{fieldErrors.AppointmentTime}</p>
+                    )}
+                    {slotInfo && bookingData.AppointmentTime && (
+                      <p className={`text-xs ${selectedTimeBooked >= slotInfo.maxPerSlot ? "text-red-400" : "text-emerald-400"}`}>
+                        {selectedTimeBooked >= slotInfo.maxPerSlot
+                          ? "ช่วงเวลานี้คิวเต็มแล้ว กรุณาเลือกเวลาอื่นครับ"
+                          : `เวลา ${bookingData.AppointmentTime} น. ช่องซ่อมว่าง ${slotInfo.maxPerSlot - selectedTimeBooked}/${slotInfo.maxPerSlot} ช่อง`}
+                      </p>
+                    )}
                   </div>
 
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
@@ -2221,54 +2393,100 @@ export default function LandingPage() {
                   </div>
 
                   {(foundBooking.Status === "Pending" || foundBooking.Status === "Confirmed") && (
-                    <form onSubmit={handleRescheduleSubmit} className="pt-4 border-t border-slate-800 space-y-3">
+                    <form onSubmit={handleRescheduleSubmit} className="pt-4 border-t border-slate-800 space-y-3.5">
                       <p className="text-xs font-semibold text-slate-300 uppercase">
                         ต้องการเลื่อนวัน-เวลานัดหมาย หรือยกเลิกคิว
                       </p>
-                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-                        <div>
-                          <label htmlFor="resched-date" className="block text-xs text-slate-400 mb-1">
-                            วันที่ใหม่ (จันทร์–เสาร์)
-                          </label>
-                          <input
-                            id="resched-date"
-                            type="date"
-                            required
-                            min={todayStr}
-                            value={rescheduleDate}
-                            onChange={(e) => setRescheduleDate(e.target.value)}
-                            className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-white text-sm scheme-dark"
-                          />
+                      <div>
+                        <label htmlFor="resched-date" className="block text-xs text-slate-400 mb-1">
+                          เลือกวันที่ใหม่ (จันทร์–เสาร์)
+                        </label>
+                        <input
+                          id="resched-date"
+                          type="date"
+                          required
+                          min={todayStr}
+                          value={rescheduleDate}
+                          onChange={(e) => setRescheduleDate(e.target.value)}
+                          className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-white text-sm scheme-dark"
+                        />
+                      </div>
+
+                      {/* ปุ่มเลือกเวลาใหม่แยก ช่วงเช้า / ช่วงบ่าย (24 ชม. ไม่มี AM/PM) */}
+                      <div className="space-y-2.5 bg-slate-900/80 border border-slate-800 rounded-xl p-3">
+                        <div className="flex items-center justify-between">
+                          <span className="text-xs text-slate-300 font-semibold">
+                            เลือกเวลาใหม่ (08:30 – 17:30 น.)
+                          </span>
+                          {rescheduleTime && (
+                            <span className="text-xs font-bold text-blue-400">
+                              เวลาที่เลือก: {rescheduleTime} น.
+                            </span>
+                          )}
                         </div>
                         <div>
-                          <label htmlFor="resched-time" className="block text-xs text-slate-400 mb-1">
-                            เวลาใหม่ (08:30 - 17:30)
-                          </label>
-                          <input
-                            id="resched-time"
-                            type="time"
-                            required
-                            min="08:30"
-                            max="17:30"
-                            value={rescheduleTime}
-                            onChange={(e) => setRescheduleTime(e.target.value)}
-                            className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-white text-sm scheme-dark"
-                          />
+                          <span className="text-[11px] font-semibold text-amber-300/90 block mb-1.5">
+                            ☀️ ช่วงเช้า (08:30 – 11:30 น.)
+                          </span>
+                          <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5">
+                            {MORNING_TIME_SLOTS.map((slot) => {
+                              const active = rescheduleTime === slot.time;
+                              return (
+                                <button
+                                  key={slot.time}
+                                  type="button"
+                                  onClick={() => setRescheduleTime(slot.time)}
+                                  className={`py-2 px-2 rounded-lg text-xs font-semibold border transition-colors cursor-pointer ${
+                                    active
+                                      ? "bg-blue-600 border-blue-400 text-white font-bold"
+                                      : "bg-slate-800 border-slate-700 text-slate-200 hover:border-blue-500/60"
+                                  }`}
+                                >
+                                  {slot.label}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
+                        <div>
+                          <span className="text-[11px] font-semibold text-sky-300/90 block mb-1.5">
+                            🌤️ ช่วงบ่าย (13:00 – 17:00 น.)
+                          </span>
+                          <div className="grid grid-cols-2 sm:grid-cols-5 gap-1.5">
+                            {AFTERNOON_TIME_SLOTS.map((slot) => {
+                              const active = rescheduleTime === slot.time;
+                              return (
+                                <button
+                                  key={slot.time}
+                                  type="button"
+                                  onClick={() => setRescheduleTime(slot.time)}
+                                  className={`py-2 px-2 rounded-lg text-xs font-semibold border transition-colors cursor-pointer ${
+                                    active
+                                      ? "bg-blue-600 border-blue-400 text-white font-bold"
+                                      : "bg-slate-800 border-slate-700 text-slate-200 hover:border-blue-500/60"
+                                  }`}
+                                >
+                                  {slot.label}
+                                </button>
+                              );
+                            })}
+                          </div>
                         </div>
                       </div>
+
                       <div className="flex flex-col sm:flex-row justify-between gap-2 pt-2">
                         <button
                           type="button"
                           disabled={lookupLoading}
                           onClick={handleCancelBooking}
-                          className="px-4 py-2 border border-red-800 text-red-300 hover:bg-red-950/60 rounded-lg text-xs font-semibold transition-colors"
+                          className="px-4 py-2.5 border border-red-800 text-red-300 hover:bg-red-950/60 rounded-lg text-xs font-semibold transition-colors"
                         >
                           ยกเลิกคิวนัดหมายนี้
                         </button>
                         <button
                           type="submit"
                           disabled={lookupLoading}
-                          className="px-5 py-2 bg-blue-600 hover:bg-blue-500 text-white font-bold rounded-lg text-xs transition-colors"
+                          className="px-5 py-2.5 bg-blue-600 hover:bg-blue-500 text-white font-bold rounded-lg text-xs transition-colors"
                         >
                           ยืนยันการเลื่อนนัดหมาย
                         </button>
